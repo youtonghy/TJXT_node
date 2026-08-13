@@ -1,0 +1,15 @@
+{
+  "Log": {
+    "Level": "info",
+    "Output": "",
+    "Access": "none"
+  },
+  "Nodes": [
+    {
+      "ApiHost": "http://127.0.0.1:3000",
+      "NodeID": 1,
+      "ApiKey": "demo-node-key",
+      "Protocol": "auto"
+    }
+  ]
+}
