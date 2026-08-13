@@ -49,9 +49,11 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, info *panel.NodeI
 		for i := range users {
 			user := format.UserTag(tag, users[i].Uuid)
 			delete(vc.users.uidMap, user)
+			delete(vc.users.uidMap, users[i].Uuid)
 			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 				tc := v.(*counter.TrafficCounter)
 				tc.Delete(user)
+				tc.Delete(users[i].Uuid)
 			}
 		}
 		return nil
@@ -70,9 +72,11 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, info *panel.NodeI
 			return err
 		}
 		delete(vc.users.uidMap, user)
+		delete(vc.users.uidMap, users[i].Uuid)
 		if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 			tc := v.(*counter.TrafficCounter)
 			tc.Delete(user)
+			tc.Delete(users[i].Uuid)
 		}
 		if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
 			lm := v.(*dispatcher.LinkManager)
@@ -97,12 +101,13 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 			if up+down > int64(mintraffic*1000) {
 				traffic.UpCounter.Store(0)
 				traffic.DownCounter.Store(0)
-				if vc.users.uidMap[email] == 0 {
+				uid := resolveUID(vc.users.uidMap, email)
+				if uid == 0 {
 					c.Delete(email)
 					return true
 				}
 				trafficSlice = append(trafficSlice, panel.UserTraffic{
-					UID:      vc.users.uidMap[email],
+					UID:      uid,
 					Upload:   up,
 					Download: down,
 				})
@@ -122,6 +127,7 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	defer v.users.mapLock.Unlock()
 	for i := range p.Users {
 		v.users.uidMap[format.UserTag(p.Tag, p.Users[i].Uuid)] = p.Users[i].Id
+		v.users.uidMap[p.Users[i].Uuid] = p.Users[i].Id
 	}
 	if staticAccountProtocol(p.NodeInfo.Type) {
 		return len(p.Users), nil
@@ -344,4 +350,16 @@ func staticAccountProtocol(nodeType string) bool {
 	default:
 		return false
 	}
+}
+
+func resolveUID(uidMap map[string]int, email string) int {
+	if id := uidMap[email]; id != 0 {
+		return id
+	}
+	if i := strings.LastIndex(email, "|"); i >= 0 {
+		if id := uidMap[email[i+1:]]; id != 0 {
+			return id
+		}
+	}
+	return 0
 }

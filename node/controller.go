@@ -111,6 +111,14 @@ func (c *Controller) Close() error {
 
 func (c *Controller) applyRuntime(node *panel.NodeInfo, users []panel.UserInfo) error {
 	if node.Type == "mtproto" {
+		if len(users) == 0 {
+			if c.mtproto != nil {
+				c.mtproto.Stop()
+				c.mtproto = nil
+			}
+			log.WithField("tag", c.tag).Info("Stopped mtproto sidecar because user list is empty")
+			return nil
+		}
 		if c.mtproto != nil {
 			c.mtproto.Stop()
 			c.mtproto = nil
@@ -121,6 +129,10 @@ func (c *Controller) applyRuntime(node *panel.NodeInfo, users []panel.UserInfo) 
 		}
 		c.mtproto = sidecar
 		log.WithField("tag", c.tag).Infof("Started mtproto sidecar for %d users", len(users))
+		return nil
+	}
+	if len(users) == 0 {
+		log.WithField("tag", c.tag).Info("Left inbound down because user list is empty")
 		return nil
 	}
 	err := c.server.AddNode(c.tag, node, users)

@@ -19,6 +19,9 @@ func buildDefaultOutbound() (*core.OutboundHandlerConfig, error) {
 
 	proxySetting := &conf.FreedomConfig{
 		DomainStrategy: "UseIPv4v6",
+		FinalRules: []*conf.FreedomFinalRuleConfig{
+			{Action: "allow"},
+		},
 	}
 	var setting json.RawMessage
 	setting, err := json.Marshal(proxySetting)
