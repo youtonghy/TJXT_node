@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -225,21 +224,34 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 	return node, nil
 }
 
+const defaultInterval = 60 * time.Second
+
+// intervalToTime converts a panel interval in seconds; missing, invalid or
+// non-positive values fall back to 60 seconds.
 func intervalToTime(i interface{}) time.Duration {
-	if i == nil {
-		return 60 * time.Second
-	}
-	switch reflect.TypeOf(i).Kind() {
-	case reflect.Int:
-		return time.Duration(i.(int)) * time.Second
-	case reflect.String:
-		i, _ := strconv.Atoi(i.(string))
-		return time.Duration(i) * time.Second
-	case reflect.Float64:
-		return time.Duration(i.(float64)) * time.Second
+	var d time.Duration
+	switch v := i.(type) {
+	case nil:
+		return defaultInterval
+	case int:
+		d = time.Duration(v) * time.Second
+	case int64:
+		d = time.Duration(v) * time.Second
+	case float64:
+		d = time.Duration(v * float64(time.Second))
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err != nil {
+			return defaultInterval
+		}
+		d = time.Duration(n) * time.Second
 	default:
-		return time.Duration(reflect.ValueOf(i).Int()) * time.Second
+		return defaultInterval
 	}
+	if d <= 0 {
+		return defaultInterval
+	}
+	return d
 }
 
 func (t TlsSettings) EffectiveServerNames() []string {

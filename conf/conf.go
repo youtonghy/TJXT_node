@@ -61,6 +61,24 @@ func (p *Conf) LoadFromPath(filePath string) error {
 			p.NodeConfigs[i].RetryCount = intPtr(DefaultNodeRetryCount)
 		}
 	}
+	return p.Validate()
+}
+
+// Validate checks the fields every node needs to reach its panel.
+func (p *Conf) Validate() error {
+	if len(p.NodeConfigs) == 0 {
+		return fmt.Errorf("config has no Nodes")
+	}
+	for i, n := range p.NodeConfigs {
+		switch {
+		case n.APIHost == "":
+			return fmt.Errorf("node %d: ApiHost is empty", i)
+		case n.NodeID <= 0:
+			return fmt.Errorf("node %d: NodeID must be positive", i)
+		case n.Key == "":
+			return fmt.Errorf("node %d: ApiKey is empty", i)
+		}
+	}
 	return nil
 }
 

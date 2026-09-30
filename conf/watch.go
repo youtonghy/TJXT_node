@@ -2,51 +2,99 @@ package conf
 
 import (
 	"fmt"
-	"log"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	log "github.com/sirupsen/logrus"
 )
 
-func (p *Conf) Watch(filePath string, reload func()) error {
-	watcher, err := fsnotify.NewWatcher()
+// watchDebounce is how long the file must stay quiet before a reload; a
+// variable so tests can shorten it.
+var watchDebounce = 2 * time.Second
+
+// Watcher reloads on changes of one config file until Close.
+type Watcher struct {
+	watcher *fsnotify.Watcher
+	done    chan struct{}
+	once    sync.Once
+}
+
+// Watch calls reload after the config file at filePath changed and still
+// parses. It watches the parent directory, because editors and config
+// management often replace the file by renaming a new one over it, which would
+// silently end a watch on the file itself.
+func Watch(filePath string, reload func()) (*Watcher, error) {
+	abs, err := filepath.Abs(filePath)
 	if err != nil {
-		return fmt.Errorf("new watcher error: %s", err)
+		return nil, fmt.Errorf("resolve config path: %w", err)
 	}
-	go func() {
-		var pre time.Time
-		defer watcher.Close()
-		for {
-			select {
-			case e := <-watcher.Events:
-				if e.Has(fsnotify.Chmod) {
-					continue
-				}
-				if pre.Add(10 * time.Second).After(time.Now()) {
-					continue
-				}
-				pre = time.Now()
-				go func() {
-					time.Sleep(5 * time.Second)
-					log.Println("config file changed, reloading...")
-					// Parse into a fresh value: the running config is shared
-					// with the core and must not be overwritten in place.
-					if err := New().LoadFromPath(filePath); err != nil {
-						log.Printf("reload config error: %s", err)
-					}
-					reload()
-					log.Println("reload config success")
-				}()
-			case err := <-watcher.Errors:
-				if err != nil {
-					log.Printf("File watcher error: %s", err)
-				}
-			}
+	fw, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, fmt.Errorf("new watcher error: %w", err)
+	}
+	if err := fw.Add(filepath.Dir(abs)); err != nil {
+		_ = fw.Close()
+		return nil, fmt.Errorf("watch config directory error: %w", err)
+	}
+	w := &Watcher{watcher: fw, done: make(chan struct{})}
+	go w.run(abs, reload)
+	return w, nil
+}
+
+func (w *Watcher) run(path string, reload func()) {
+	defer close(w.done)
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
 		}
 	}()
-	err = watcher.Add(filePath)
-	if err != nil {
-		return fmt.Errorf("watch file error: %s", err)
+	fire := make(chan struct{}, 1)
+	for {
+		select {
+		case e, ok := <-w.watcher.Events:
+			if !ok {
+				return
+			}
+			if filepath.Clean(e.Name) != path || e.Op == fsnotify.Chmod {
+				continue
+			}
+			if timer == nil {
+				timer = time.AfterFunc(watchDebounce, func() {
+					select {
+					case fire <- struct{}{}:
+					default:
+					}
+				})
+			} else {
+				timer.Reset(watchDebounce)
+			}
+		case <-fire:
+			// Parse into a fresh value: the running config is shared with the
+			// core, and a broken file must not trigger a reload.
+			if err := New().LoadFromPath(path); err != nil {
+				log.WithField("err", err).Error("Config file changed but does not parse, keeping the running config")
+				continue
+			}
+			log.Info("Config file changed, reloading")
+			reload()
+		case err, ok := <-w.watcher.Errors:
+			if !ok {
+				return
+			}
+			log.WithField("err", err).Error("Config file watcher error")
+		}
 	}
-	return nil
+}
+
+// Close stops watching and waits for the watch goroutine to exit.
+func (w *Watcher) Close() error {
+	var err error
+	w.once.Do(func() {
+		err = w.watcher.Close()
+		<-w.done
+	})
+	return err
 }

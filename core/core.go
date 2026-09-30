@@ -1,13 +1,10 @@
 package core
 
 import (
+	"fmt"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
-	"github.com/youtonghy/TJXT_node/conf"
-	"github.com/youtonghy/TJXT_node/core/app/dispatcher"
-	_ "github.com/youtonghy/TJXT_node/core/distro/all"
 	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/app/stats"
 	"github.com/xtls/xray-core/common/serial"
@@ -16,6 +13,10 @@ import (
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/routing"
 	coreConf "github.com/xtls/xray-core/infra/conf"
+	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/conf"
+	"github.com/youtonghy/TJXT_node/core/app/dispatcher"
+	_ "github.com/youtonghy/TJXT_node/core/distro/all"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -54,10 +55,17 @@ func New(config *conf.Conf) *V2Core {
 func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	v.access.Lock()
 	defer v.access.Unlock()
-	v.Server = getCore(v.Config, infos)
-	if err := v.Server.Start(); err != nil {
+	server, err := getCore(v.Config, infos)
+	if err != nil {
 		return err
 	}
+	if err := server.Start(); err != nil {
+		if cerr := server.Close(); cerr != nil {
+			log.WithField("err", cerr).Error("Close core after failed start failed")
+		}
+		return fmt.Errorf("start xray core: %w", err)
+	}
+	v.Server = server
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
@@ -71,14 +79,21 @@ func (v *V2Core) Close() error {
 	v.ihm = nil
 	v.ohm = nil
 	v.dispatcher = nil
+	if v.Server == nil {
+		return nil
+	}
 	err := v.Server.Close()
+	v.Server = nil
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
+// BuildConfig builds the Xray configuration for the given nodes without
+// starting anything, so a new configuration can be validated while the
+// current core keeps running.
+func BuildConfig(c *conf.Conf, infos []*panel.NodeInfo) (*core.Config, error) {
 	// Log Config
 	coreLogConfig := &coreConf.LogConfig{
 		LogLevel:  c.LogConfig.Level,
@@ -88,7 +103,7 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	// Custom config
 	dnsConfig, outBoundConfig, routeConfig, err := GetCustomConfig(infos)
 	if err != nil {
-		log.WithField("err", err).Panic("failed to build custom config")
+		return nil, fmt.Errorf("build custom config: %w", err)
 	}
 	// Inbound config
 	var inBoundConfig []*core.InboundHandlerConfig
@@ -105,9 +120,12 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	}
 	corePolicyConfig := &coreConf.PolicyConfig{}
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
-	policyConfig, _ := corePolicyConfig.Build()
+	policyConfig, err := corePolicyConfig.Build()
+	if err != nil {
+		return nil, fmt.Errorf("build policy config: %w", err)
+	}
 	// Build Xray conf
-	config := &core.Config{
+	return &core.Config{
 		App: []*serial.TypedMessage{
 			serial.ToTypedMessage(coreLogConfig.Build()),
 			serial.ToTypedMessage(&dispatcher.Config{}),
@@ -120,11 +138,18 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 		},
 		Inbound:  inBoundConfig,
 		Outbound: outBoundConfig,
+	}, nil
+}
+
+func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
+	config, err := BuildConfig(c, infos)
+	if err != nil {
+		return nil, err
 	}
 	server, err := core.New(config)
 	if err != nil {
-		log.WithField("err", err).Panic("failed to create instance")
+		return nil, fmt.Errorf("create xray instance: %w", err)
 	}
 	log.Info("Xray Core Version: ", core.Version())
-	return server
+	return server, nil
 }

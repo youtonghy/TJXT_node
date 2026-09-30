@@ -16,20 +16,18 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		Name:     "nodeInfoMonitor",
 		Interval: node.PullInterval,
 		Execute:  c.nodeInfoMonitor,
-		ReloadCh: c.server.ReloadCh,
 	}
 	// fetch user list task
 	c.userReportPeriodic = &task.Task{
 		Name:     "reportUserTrafficTask",
 		Interval: node.PushInterval,
 		Execute:  c.reportUserTrafficTask,
-		ReloadCh: c.server.ReloadCh,
 	}
 	log.WithField("tag", c.tag).Info("Start monitor node status")
 	// delay to start nodeInfoMonitor
-	_ = c.nodeInfoMonitorPeriodic.Start(false)
+	c.startTask(c.nodeInfoMonitorPeriodic, false)
 	log.WithField("tag", c.tag).Info("Start report node status")
-	_ = c.userReportPeriodic.Start(false)
+	c.startTask(c.userReportPeriodic, false)
 	if node.Security == panel.Tls {
 		switch c.info.Common.CertInfo.CertMode {
 		case "none", "", "file", "self":
@@ -38,12 +36,17 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 				Name:     "renewCertTask",
 				Interval: time.Hour * 24,
 				Execute:  c.renewCertTask,
-				ReloadCh: c.server.ReloadCh,
 			}
 			log.WithField("tag", c.tag).Info("Start renew cert")
 			// delay to start renewCert
-			_ = c.renewCertPeriodic.Start(true)
+			c.startTask(c.renewCertPeriodic, true)
 		}
+	}
+}
+
+func (c *Controller) startTask(t *task.Task, first bool) {
+	if err := t.Start(first); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Start task failed")
 	}
 }
 
@@ -70,7 +73,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 			default:
 			}
 		} else {
-			log.Panic("Reload failed")
+			log.WithField("tag", c.tag).Error("No reload channel, the new node info is ignored")
 		}
 	}
 	log.WithField("tag", c.tag).Debug("Node info no change")
