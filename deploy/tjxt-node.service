@@ -1,0 +1,23 @@
+[Unit]
+Description=TJXT_node Xray agent for TONG-ladder
+Documentation=https://github.com/youtonghy/TJXT_node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/usr/local/tjxt-node
+ExecStart=/usr/local/tjxt-node/tjxt-node server -c /etc/tjxt-node/config.json
+Restart=always
+RestartSec=5
+LimitNOFILE=infinity
+LimitNPROC=infinity
+TasksMax=infinity
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

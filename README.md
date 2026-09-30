@@ -28,6 +28,32 @@ Authenticate with `X-Server-Token: <per-node server_key>`. Do not use a user or 
 }
 ```
 
+## Deploy
+
+VPS 一键安装（systemd / OpenRC），从源码编译并写入 `/etc/tjxt-node/config.json`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh \
+  | sudo bash -s -- --api-host https://panel.example.com --node-id 1 --api-key 'your-server-key'
+```
+
+已克隆仓库时：
+
+```bash
+sudo ./deploy.sh --api-host https://panel.example.com --node-id 1 --api-key 'your-server-key'
+```
+
+国内编译可加 `GOPROXY=https://goproxy.cn,direct`。安装后：
+
+```bash
+sudo tjxt-node-deploy status
+sudo tjxt-node-deploy log
+sudo tjxt-node-deploy restart
+sudo tjxt-node-deploy update
+```
+
+仅本地编译、不装服务：`./deploy.sh local`。节点监听端口由面板下发，脚本不会改防火墙。
+
 ## Build
 
 ```bash
