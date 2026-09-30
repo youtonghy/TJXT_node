@@ -93,16 +93,14 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
+		// Keep the previous alive list; it must not block user updates.
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
 		}).Error("Get alive list failed")
-		return nil
-	}
-
-	// update alive list
-	if newA != nil {
-		c.limiter.AliveList = newA
+	} else if newA != nil {
+		c.aliveMap = newA
+		c.limiter.SetAliveList(newA)
 	}
 	// nil means unchanged (304); an empty slice means the panel removed everyone.
 	if newU != nil {

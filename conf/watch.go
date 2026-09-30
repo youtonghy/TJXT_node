@@ -29,9 +29,9 @@ func (p *Conf) Watch(filePath string, reload func()) error {
 				go func() {
 					time.Sleep(5 * time.Second)
 					log.Println("config file changed, reloading...")
-					*p = *New()
-					err := p.LoadFromPath(filePath)
-					if err != nil {
+					// Parse into a fresh value: the running config is shared
+					// with the core and must not be overwritten in place.
+					if err := New().LoadFromPath(filePath); err != nil {
 						log.Printf("reload config error: %s", err)
 					}
 					reload()

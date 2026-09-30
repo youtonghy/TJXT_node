@@ -29,10 +29,6 @@ type UserInfo struct {
 	DeviceLimit int    `json:"device_limit" msgpack:"device_limit"`
 }
 
-type UserListBody struct {
-	Users []UserInfo `json:"users" msgpack:"users"`
-}
-
 type AliveMap struct {
 	Alive map[int]int `json:"alive"`
 }
@@ -54,7 +50,7 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 }
 
 func (c *Client) getUserListV3(ctx context.Context) ([]UserInfo, error) {
-	r, body, err := c.callV3(ctx, "GET", "server/UniProxy/user", identityParams(c), c.userEtag)
+	r, body, err := c.callV3(ctx, "GET", "server/UniProxy/user", identityParams(c), c.getUserEtag())
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +61,7 @@ func (c *Client) getUserListV3(ctx context.Context) ([]UserInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode v3 user list: %w", err)
 	}
-	c.userEtag = r.Header().Get("ETag")
+	c.setUserEtag(r.Header().Get("ETag"))
 	return users, nil
 }
 
@@ -73,7 +69,7 @@ func (c *Client) getUserListV1(ctx context.Context) ([]UserInfo, error) {
 	const path = "/api/v1/server/UniProxy/user"
 	r, err := c.client.R().
 		SetContext(ctx).
-		SetHeader("If-None-Match", c.userEtag).
+		SetHeader("If-None-Match", c.getUserEtag()).
 		SetHeader("X-Response-Format", "msgpack").
 		SetDoNotParseResponse(true).
 		Get(path)
@@ -101,7 +97,7 @@ func (c *Client) getUserListV1(ctx context.Context) ([]UserInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode user list error: %w", err)
 	}
-	c.userEtag = r.Header().Get("ETag")
+	c.setUserEtag(r.Header().Get("ETag"))
 	return users, nil
 }
 
@@ -175,32 +171,24 @@ func decodeUserListJSON(r io.Reader) ([]UserInfo, error) {
 	return nil, errMissingUsers
 }
 
-// GetUserAlive will fetch the alive_ip count for users
+// GetUserAlive fetches the panel-wide alive IP count per user.
 func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
-	c.AliveMap = &AliveMap{}
 	const path = "/api/v1/server/UniProxy/alivelist"
 	r, err := c.client.R().
 		SetContext(ctx).
 		ForceContentType("application/json").
 		Get(path)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
-		c.AliveMap.Alive = make(map[int]int)
-		return c.AliveMap.Alive, nil
+	if err := checkResponse(r, err, "get alive list"); err != nil {
+		return nil, err
 	}
-	if r == nil || r.RawResponse == nil || r.StatusCode() >= 399 {
-		c.AliveMap.Alive = make(map[int]int)
-		return c.AliveMap.Alive, nil
+	alive := &AliveMap{}
+	if err := json.Unmarshal(r.Body(), alive); err != nil {
+		return nil, fmt.Errorf("unmarshal user alive list error: %w", err)
 	}
-	defer r.RawResponse.Body.Close()
-	if err := json.Unmarshal(r.Body(), c.AliveMap); err != nil {
-		fmt.Printf("unmarshal user alive list error: %s", err)
-		c.AliveMap.Alive = make(map[int]int)
+	if alive.Alive == nil {
+		alive.Alive = make(map[int]int)
 	}
-
-	return c.AliveMap.Alive, nil
+	return alive.Alive, nil
 }
 
 type UserTraffic struct {

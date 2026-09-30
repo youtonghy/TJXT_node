@@ -2,8 +2,6 @@ package panel
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -123,18 +121,14 @@ type EncSettings struct {
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	var body []byte
 	if c.v3Available() {
-		r, data, err := c.callV3(ctx, "GET", "server/UniProxy/config", identityParams(c), c.nodeEtag)
+		r, data, err := c.callV3(ctx, "GET", "server/UniProxy/config", identityParams(c), c.getNodeEtag())
 		if err == nil {
 			if r.StatusCode() == 304 {
 				return nil, nil
 			}
-			hash := sha256.Sum256(data)
-			newBodyHash := hex.EncodeToString(hash[:])
-			if c.responseBodyHash == newBodyHash {
+			if !c.updateNodeCache(r.Header().Get("ETag"), data) {
 				return nil, nil
 			}
-			c.responseBodyHash = newBodyHash
-			c.nodeEtag = r.Header().Get("ETag")
 			return parseNodeInfo(c, data)
 		}
 		if !errors.Is(err, errV3Unsupported) {
@@ -148,7 +142,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	r, err := c.client.
 		R().
 		SetContext(ctx).
-		SetHeader("If-None-Match", c.nodeEtag).
+		SetHeader("If-None-Match", c.getNodeEtag()).
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
@@ -161,13 +155,12 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if r.StatusCode() == 304 {
 		return nil, nil
 	}
-	hash := sha256.Sum256(r.Body())
-	newBodyHash := hex.EncodeToString(hash[:])
-	if c.responseBodyHash == newBodyHash {
+	if err := checkResponse(r, nil, "get node config"); err != nil {
+		return nil, err
+	}
+	if !c.updateNodeCache(r.Header().Get("ETag"), r.Body()) {
 		return nil, nil
 	}
-	c.responseBodyHash = newBodyHash
-	c.nodeEtag = r.Header().Get("ETag")
 	body = r.Body()
 	return parseNodeInfo(c, body)
 }

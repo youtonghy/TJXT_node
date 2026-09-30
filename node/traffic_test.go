@@ -59,3 +59,32 @@ func TestCloseFlushesRemainingTraffic(t *testing.T) {
 		t.Fatalf("final flush did not report: %+v", pushes)
 	}
 }
+
+// TestPollAndReportConcurrently runs the two controller tasks in parallel with
+// live traffic and user churn; run it with -race.
+func TestPollAndReportConcurrently(t *testing.T) {
+	p := newFakePanel(t, "vless", testUsers(1, 2))
+	ctrl, x := startTestController(t, p)
+	counter := x.TrafficCounter(ctrl.tag)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 20 {
+			if i%2 == 0 {
+				p.setUsers(testUsers(1, 3))
+			} else {
+				p.setUsers(testUsers(1, 2))
+			}
+			_ = ctrl.nodeInfoMonitor(t.Context())
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		counter.Tx(format.UserTag(ctrl.tag, testUsers(1)[0].Uuid), 10)
+		_ = ctrl.reportUserTrafficTask(t.Context())
+	}
+}

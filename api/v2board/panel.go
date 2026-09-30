@@ -1,9 +1,12 @@
 package panel
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -15,17 +18,52 @@ import (
 // Panel is the interface for different panel's api.
 
 type Client struct {
-	client           *resty.Client
-	APIHost          string
-	Token            string
-	NodeId           int
-	mode             protocolMode
+	client  *resty.Client
+	APIHost string
+	Token   string
+	NodeId  int
+	mode    protocolMode
+
+	// mu guards the mutable protocol and cache state below; the node info
+	// monitor and the traffic report task use one client concurrently.
+	mu               sync.Mutex
 	v3Failed         bool
 	nodeEtag         string
 	userEtag         string
 	responseBodyHash string
-	UserList         *UserListBody
-	AliveMap         *AliveMap
+}
+
+func (c *Client) getNodeEtag() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.nodeEtag
+}
+
+func (c *Client) getUserEtag() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.userEtag
+}
+
+func (c *Client) setUserEtag(etag string) {
+	c.mu.Lock()
+	c.userEtag = etag
+	c.mu.Unlock()
+}
+
+// updateNodeCache records a fetched node config and reports whether its body
+// differs from the previous one.
+func (c *Client) updateNodeCache(etag string, body []byte) bool {
+	hash := sha256.Sum256(body)
+	newBodyHash := hex.EncodeToString(hash[:])
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.responseBodyHash == newBodyHash {
+		return false
+	}
+	c.responseBodyHash = newBodyHash
+	c.nodeEtag = etag
+	return true
 }
 
 func New(c *conf.NodeConfig) (*Client, error) {
@@ -55,12 +93,10 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		"token":     c.Key,
 	})
 	return &Client{
-		client:   client,
-		Token:    c.Key,
-		APIHost:  c.APIHost,
-		NodeId:   c.NodeID,
-		mode:     parseProtocolMode(c.Protocol),
-		UserList: &UserListBody{},
-		AliveMap: &AliveMap{},
+		client:  client,
+		Token:   c.Key,
+		APIHost: c.APIHost,
+		NodeId:  c.NodeID,
+		mode:    parseProtocolMode(c.Protocol),
 	}, nil
 }

@@ -70,7 +70,9 @@ func (c *Controller) Start(x *core.V2Core) error {
 	}
 	c.aliveMap, err = c.apiClient.GetUserAlive(context.Background())
 	if err != nil {
-		return fmt.Errorf("failed to get user alive list: %s", err)
+		// The alive list only refines device limits; start without it.
+		log.WithFields(log.Fields{"tag": node.Tag, "err": err}).Warn("Get alive list failed, device limits use local counts only")
+		c.aliveMap = map[int]int{}
 	}
 	c.tag = node.Tag
 
@@ -230,9 +232,11 @@ func (c *Controller) resetRuntime() {
 	if err := c.stopRuntime(); err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Stop inbound after failed user sync failed")
 	}
+	// The limiter still mirrors the last applied list; empty it in place so
+	// concurrent readers keep a valid limiter.
+	c.limiter.UpdateUser(c.tag, nil, c.userList, nil)
 	c.userList = nil
 	c.resync = true
-	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, nil, c.aliveMap)
 }
 
 // stopRuntime stops the inbound or sidecar; stopping one that is not running is

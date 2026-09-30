@@ -44,12 +44,19 @@ func (c *Client) useV1() bool {
 
 func (c *Client) markV3Unavailable() {
 	if c.mode == modeAuto {
+		c.mu.Lock()
 		c.v3Failed = true
+		c.mu.Unlock()
 	}
 }
 
 func (c *Client) v3Available() bool {
-	return c.useV3() && !c.v3Failed
+	if !c.useV3() {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return !c.v3Failed
 }
 
 func (c *Client) callV3(
