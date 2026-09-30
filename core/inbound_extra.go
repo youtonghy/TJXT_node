@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	coreConf "github.com/xtls/xray-core/infra/conf"
 	panel "github.com/youtonghy/TJXT_node/api/v2board"
 	"github.com/youtonghy/TJXT_node/common/crypt"
 	"github.com/youtonghy/TJXT_node/common/format"
-	coreConf "github.com/xtls/xray-core/infra/conf"
 )
 
 func buildHTTP(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig, users []panel.UserInfo) error {
@@ -17,7 +17,7 @@ func buildHTTP(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig, 
 		return fmt.Errorf("http inbound refuses noauth: user list is empty")
 	}
 	settings := &coreConf.HTTPServerConfig{
-		Accounts:    httpAccounts(users),
+		Users:       httpAccounts(users),
 		Transparent: boolFromSettings(nodeInfo, "allowTransparent"),
 	}
 	raw, err := json.Marshal(settings)
@@ -39,7 +39,7 @@ func buildMixed(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig,
 	}
 	settings := &coreConf.SocksServerConfig{
 		AuthMethod: "password",
-		Accounts:   socksAccounts(users),
+		Users:      socksAccounts(users),
 		UDP:        udp,
 	}
 	raw, err := json.Marshal(settings)
@@ -110,9 +110,8 @@ func buildWireGuard(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourCon
 			settings.Address = addresses
 		}
 	}
-	if domain := settingString(nodeInfo, "domainStrategy"); domain != "" {
-		settings.DomainStrategy = domain
-	}
+	// Xray v26.9 removed WireGuard domainStrategy (it only affected outbound
+	// dialing); the panel's "domainStrategy" setting is no longer applicable.
 	raw, err := json.Marshal(settings)
 	if err != nil {
 		return fmt.Errorf("marshal wireguard settings: %w", err)

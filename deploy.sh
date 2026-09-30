@@ -6,7 +6,7 @@ set -euo pipefail
 readonly APP_NAME="tjxt-node"
 readonly DEFAULT_REPO="https://github.com/youtonghy/TJXT_node.git"
 readonly DEFAULT_BRANCH="main"
-readonly DEFAULT_GO_VERSION="1.26.1"
+readonly DEFAULT_GO_VERSION="1.27.1"
 readonly DEFAULT_PREFIX="/usr/local/tjxt-node"
 readonly DEFAULT_CONFIG_DIR="/etc/tjxt-node"
 readonly DEFAULT_SRC="/usr/local/src/TJXT_node"
@@ -229,7 +229,7 @@ go_version_ok() {
   raw="$(go version 2>/dev/null | awk '{print $3}')"
   raw="${raw#go}"
   [[ -n "$raw" ]] || return 1
-  version_ge "$raw" "1.26"
+  version_ge "$raw" "1.27"
 }
 
 ensure_go() {
@@ -239,7 +239,7 @@ ensure_go() {
   fi
   local os arch tarball tmp dest
   os="$(os_id)"
-  [[ "$os" == "darwin" || "$os" == "linux" ]] || die "请先安装 Go >= 1.26"
+  [[ "$os" == "darwin" || "$os" == "linux" ]] || die "请先安装 Go >= 1.27"
   arch="$(go_arch)"
   tarball="go${DEFAULT_GO_VERSION}.${os}-${arch}.tar.gz"
   dest="/usr/local/go"
@@ -608,8 +608,8 @@ cmd_local() {
   else
     die "local 模式需要在仓库根目录运行，或指定 --source"
   fi
-  command -v go >/dev/null 2>&1 || die "local 模式需要本机已安装 Go >= 1.26"
-  go_version_ok || die "Go 版本过低，需要 >= 1.26（当前: $(go version)）"
+  command -v go >/dev/null 2>&1 || die "local 模式需要本机已安装 Go >= 1.27"
+  go_version_ok || die "Go 版本过低，需要 >= 1.27（当前: $(go version)）"
   export CGO_ENABLED=0
   export GOEXPERIMENT=jsonv2
   export GOPROXY="${GOPROXY:-https://goproxy.cn,https://proxy.golang.org,direct}"
