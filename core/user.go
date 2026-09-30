@@ -7,10 +7,6 @@ import (
 	"strings"
 	"time"
 
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
-	"github.com/youtonghy/TJXT_node/common/counter"
-	"github.com/youtonghy/TJXT_node/common/format"
-	"github.com/youtonghy/TJXT_node/core/app/dispatcher"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/infra/conf"
@@ -22,6 +18,10 @@ import (
 	"github.com/xtls/xray-core/proxy/trojan"
 	"github.com/xtls/xray-core/proxy/tuic"
 	"github.com/xtls/xray-core/proxy/vless"
+	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/common/counter"
+	"github.com/youtonghy/TJXT_node/common/format"
+	"github.com/youtonghy/TJXT_node/core/app/dispatcher"
 )
 
 func (v *V2Core) GetUserManager(tag string) (proxy.UserManager, error) {
@@ -85,41 +85,6 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, info *panel.NodeI
 		}
 	}
 	return nil
-}
-
-func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserTraffic, error) {
-	trafficSlice := make([]panel.UserTraffic, 0)
-	vc.users.mapLock.RLock()
-	defer vc.users.mapLock.RUnlock()
-	if v, ok := vc.dispatcher.Counter.Load(tag); ok {
-		c := v.(*counter.TrafficCounter)
-		c.Counters.Range(func(key, value interface{}) bool {
-			email := key.(string)
-			traffic := value.(*counter.TrafficStorage)
-			up := traffic.UpCounter.Load()
-			down := traffic.DownCounter.Load()
-			if up+down > int64(mintraffic*1000) {
-				traffic.UpCounter.Store(0)
-				traffic.DownCounter.Store(0)
-				uid := resolveUID(vc.users.uidMap, email)
-				if uid == 0 {
-					c.Delete(email)
-					return true
-				}
-				trafficSlice = append(trafficSlice, panel.UserTraffic{
-					UID:      uid,
-					Upload:   up,
-					Download: down,
-				})
-			}
-			return true
-		})
-		if len(trafficSlice) == 0 {
-			return nil, nil
-		}
-		return trafficSlice, nil
-	}
-	return nil, nil
 }
 
 func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {

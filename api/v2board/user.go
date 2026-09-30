@@ -10,6 +10,7 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 
+	"github.com/go-resty/resty/v2"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -156,32 +157,80 @@ type UserTraffic struct {
 	Download int64
 }
 
-// ReportUserTraffic reports the user traffic
-func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffic) error {
-	data := make(map[int][]int64, len(userTraffic))
+// TrafficBatchHeader carries the traffic batch ID on direct (v1) pushes. The v3
+// gateway only forwards auth headers, so there the ID travels in the body.
+const TrafficBatchHeader = "X-Traffic-Batch-Id"
+
+// PushResult is the panel's answer to an accepted traffic push.
+type PushResult struct {
+	// RejectedUserIDs lists users the panel accepted but did not bill (no
+	// package on this node); their traffic is not retryable.
+	RejectedUserIDs []int `json:"rejected_user_ids"`
+	// RetrySafe reports whether the panel deduplicates this batch by its ID.
+	RetrySafe bool `json:"retry_safe"`
+}
+
+// trafficPushBody is the wrapped push payload accepted by the panel:
+// {"batch_id": "...", "traffic": {"<uid>": [upload, download]}}.
+type trafficPushBody struct {
+	BatchID string              `json:"batch_id"`
+	Traffic map[string][2]int64 `json:"traffic"`
+}
+
+func newTrafficPushBody(batchID string, userTraffic []UserTraffic) trafficPushBody {
+	data := make(map[string][2]int64, len(userTraffic))
 	for i := range userTraffic {
-		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
+		key := strconv.Itoa(userTraffic[i].UID)
+		pair := data[key]
+		pair[0] += userTraffic[i].Upload
+		pair[1] += userTraffic[i].Download
+		data[key] = pair
 	}
+	return trafficPushBody{BatchID: batchID, Traffic: data}
+}
+
+func decodePushResult(body []byte) (*PushResult, error) {
+	result := &PushResult{}
+	if len(body) == 0 {
+		return result, nil
+	}
+	if err := json.Unmarshal(body, result); err != nil {
+		return nil, fmt.Errorf("decode push response: %w", err)
+	}
+	return result, nil
+}
+
+// ReportUserTraffic reports one traffic batch. The batch ID lets the panel apply a
+// retried batch exactly once, so callers must resend the same ID and content until
+// this returns nil.
+func (c *Client) ReportUserTraffic(ctx context.Context, batchID string, userTraffic []UserTraffic) (*PushResult, error) {
+	body := newTrafficPushBody(batchID, userTraffic)
 	if c.v3Available() {
 		params := identityParams(c)
-		for uid, pair := range data {
-			params[strconv.Itoa(uid)] = pair
+		params["batch_id"] = body.BatchID
+		params["traffic"] = body.Traffic
+		r, _, err := c.callV3(ctx, "POST", "server/UniProxy/push", params, "")
+		if err == nil {
+			return decodePushResult(r.Body())
 		}
-		_, _, err := c.callV3(ctx, "POST", "server/UniProxy/push", params, "")
-		if err == nil || !errors.Is(err, errV3Unsupported) {
-			return err
+		if !errors.Is(err, errV3Unsupported) {
+			return nil, err
 		}
 	}
 	if !c.useV1() {
-		return fmt.Errorf("v3 push failed and v1 fallback is disabled")
+		return nil, fmt.Errorf("v3 push failed and v1 fallback is disabled")
 	}
 	const path = "/api/v1/server/UniProxy/push"
-	_, err := c.client.R().
+	r, err := c.client.R().
 		SetContext(ctx).
-		SetBody(data).
+		SetHeader(TrafficBatchHeader, batchID).
+		SetBody(body).
 		ForceContentType("application/json").
 		Post(path)
-	return err
+	if err := checkResponse(r, err, "push traffic"); err != nil {
+		return nil, err
+	}
+	return decodePushResult(r.Body())
 }
 
 func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
@@ -199,10 +248,24 @@ func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]stri
 		return fmt.Errorf("v3 alive failed and v1 fallback is disabled")
 	}
 	const path = "/api/v1/server/UniProxy/alive"
-	_, err := c.client.R().
+	r, err := c.client.R().
 		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
-	return err
+	return checkResponse(r, err, "report online users")
+}
+
+// checkResponse turns a transport error or a non-2xx status into an error.
+func checkResponse(r *resty.Response, err error, action string) error {
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return fmt.Errorf("%s: nil response", action)
+	}
+	if r.StatusCode() < 200 || r.StatusCode() >= 300 {
+		return fmt.Errorf("%s: %s: %s", action, r.Status(), truncateBody(r.Body()))
+	}
+	return nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/youtonghy/TJXT_node/api/v2board"
@@ -26,6 +28,10 @@ type Controller struct {
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
+	// trafficMu serializes traffic reports so the periodic task and the final
+	// flush on Close never report or acknowledge the same batch twice.
+	trafficMu      sync.Mutex
+	pendingTraffic *core.TrafficBatch
 }
 
 // NewController return a Node controller with default parameters.
@@ -95,6 +101,7 @@ func (c *Controller) Close() error {
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
 	}
+	c.finalFlush()
 	if c.mtproto != nil {
 		c.mtproto.Stop()
 		c.mtproto = nil
@@ -107,6 +114,32 @@ func (c *Controller) Close() error {
 		return fmt.Errorf("del node error: %s", err)
 	}
 	return nil
+}
+
+// finalFlushTimeout bounds the traffic report attempted while closing.
+const finalFlushTimeout = 15 * time.Second
+
+// finalFlush reports the pending batch and then all remaining traffic before the
+// inbound and its counters go away. Failures are logged; the counters are lost
+// only if the panel is unreachable during shutdown or reload.
+func (c *Controller) finalFlush() {
+	if c.server == nil || c.apiClient == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), finalFlushTimeout)
+	defer cancel()
+	// The first call drains a pending batch, the second one the rest.
+	for range 2 {
+		traffic, err := c.flushTraffic(ctx, 0)
+		if err != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "err": err}).
+				Error("Final traffic report failed, unreported traffic is dropped")
+			return
+		}
+		if len(traffic) == 0 {
+			return
+		}
+	}
 }
 
 func (c *Controller) applyRuntime(node *panel.NodeInfo, users []panel.UserInfo) error {

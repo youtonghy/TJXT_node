@@ -1,0 +1,61 @@
+package node
+
+import (
+	"net/http"
+	"testing"
+
+	"github.com/youtonghy/TJXT_node/common/format"
+)
+
+func TestTrafficBatchRetriedWithSameIDUntilAcked(t *testing.T) {
+	p := newFakePanel(t, "vless", testUsers(1))
+	ctrl, x := startTestController(t, p)
+	counter := x.TrafficCounter(ctrl.tag)
+	email := format.UserTag(ctrl.tag, testUsers(1)[0].Uuid)
+	counter.Tx(email, 1000)
+	counter.Rx(email, 2000)
+
+	p.setPushStatus(http.StatusServiceUnavailable)
+	if _, err := ctrl.flushTraffic(t.Context(), 0); err == nil {
+		t.Fatal("expected the first push to fail")
+	}
+	// Bytes counted after the failed push must not join the pending batch.
+	counter.Tx(email, 5)
+	p.setPushStatus(http.StatusOK)
+	if _, err := ctrl.flushTraffic(t.Context(), 0); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	pushes := p.Pushes()
+	if len(pushes) != 2 {
+		t.Fatalf("expected 2 pushes, got %d", len(pushes))
+	}
+	if pushes[0].BatchID == "" || pushes[0].BatchID != pushes[1].BatchID || pushes[1].Header != pushes[1].BatchID {
+		t.Fatalf("retry did not reuse the batch ID: %+v", pushes)
+	}
+	if got := pushes[1].Traffic["1"]; got != [2]int64{1000, 2000} {
+		t.Fatalf("retry changed the batch content: %+v", got)
+	}
+	if up, down := counter.GetUpCount(email), counter.GetDownCount(email); up != 5 || down != 0 {
+		t.Fatalf("ack subtracted the wrong amount: up=%d down=%d", up, down)
+	}
+	// The next report is a fresh batch with the remaining bytes.
+	if _, err := ctrl.flushTraffic(t.Context(), 0); err != nil {
+		t.Fatalf("next push: %v", err)
+	}
+	pushes = p.Pushes()
+	if len(pushes) != 3 || pushes[2].BatchID == pushes[1].BatchID || pushes[2].Traffic["1"] != [2]int64{5, 0} {
+		t.Fatalf("unexpected third push %+v", pushes)
+	}
+}
+
+func TestCloseFlushesRemainingTraffic(t *testing.T) {
+	p := newFakePanel(t, "vless", testUsers(1))
+	ctrl, x := startTestController(t, p)
+	email := format.UserTag(ctrl.tag, testUsers(1)[0].Uuid)
+	x.TrafficCounter(ctrl.tag).Tx(email, 42)
+	ctrl.finalFlush()
+	pushes := p.Pushes()
+	if len(pushes) != 1 || pushes[0].Traffic["1"] != [2]int64{42, 0} {
+		t.Fatalf("final flush did not report: %+v", pushes)
+	}
+}

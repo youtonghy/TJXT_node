@@ -96,7 +96,6 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.WithField("err", err).Error("Start core failed")
 		return
 	}
-	defer v2core.Close()
 	//node
 	err = nodes.Start(c.NodeConfigs, v2core)
 	if err != nil {
@@ -127,7 +126,14 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		select {
 		case <-osSignals:
 			log.Info("收到退出信号，正在关闭程序...")
-			os.Exit(0)
+			// Closing the nodes flushes unreported traffic to the panel.
+			if err := nodes.Close(); err != nil {
+				log.WithField("err", err).Error("Close nodes failed")
+			}
+			if err := v2core.Close(); err != nil {
+				log.WithField("err", err).Error("Close core failed")
+			}
+			return
 		case <-reloadCh:
 			log.Info("收到重启信号，正在重新加载配置...")
 			if err := reload(config, &nodes, &v2core); err != nil {

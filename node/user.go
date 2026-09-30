@@ -3,32 +3,25 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/youtonghy/TJXT_node/api/v2board"
 )
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
-	var reportmin = 0
 	var devicemin = 0
 	if c.info.Common.BaseConfig != nil {
-		reportmin = c.info.Common.BaseConfig.NodeReportMinTraffic
 		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
-	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
-	if len(userTraffic) > 0 {
-		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Info("Report user traffic failed")
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-		} else {
-			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
-			//log.WithField("tag", c.tag).Debugf("User traffic: %+v", userTraffic)
+	userTraffic, err := c.flushTraffic(ctx, c.reportMinTraffic())
+	if err != nil {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Warn("Report user traffic failed, the batch is kept and retried")
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
 	}
 
@@ -72,6 +65,45 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	}
 
 	return nil
+}
+
+func (c *Controller) reportMinTraffic() int {
+	if c.info != nil && c.info.Common != nil && c.info.Common.BaseConfig != nil {
+		return c.info.Common.BaseConfig.NodeReportMinTraffic
+	}
+	return 0
+}
+
+// flushTraffic reports the pending traffic batch, or a new snapshot when nothing
+// is pending. A batch stays pending (same ID, same content) until the panel
+// acknowledges it; only then are its bytes subtracted from the live counters.
+// It returns the traffic of the batch it tried to report.
+func (c *Controller) flushTraffic(ctx context.Context, minTraffic int) ([]panel.UserTraffic, error) {
+	c.trafficMu.Lock()
+	defer c.trafficMu.Unlock()
+	if c.pendingTraffic == nil {
+		c.pendingTraffic = c.server.SnapshotTraffic(c.tag, minTraffic)
+		if c.pendingTraffic == nil {
+			return nil, nil
+		}
+	}
+	batch := c.pendingTraffic
+	userTraffic := batch.Traffic()
+	result, err := c.apiClient.ReportUserTraffic(ctx, batch.ID, userTraffic)
+	if err != nil {
+		return userTraffic, fmt.Errorf("batch %s: %w", batch.ID, err)
+	}
+	c.server.AckTraffic(batch)
+	c.pendingTraffic = nil
+	if result != nil && len(result.RejectedUserIDs) > 0 {
+		log.WithFields(log.Fields{
+			"tag":   c.tag,
+			"batch": batch.ID,
+			"users": result.RejectedUserIDs,
+		}).Warn("Panel did not bill traffic of some users")
+	}
+	log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
+	return userTraffic, nil
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []panel.UserInfo) {
