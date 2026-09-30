@@ -12,6 +12,7 @@ readonly DEFAULT_CONFIG_DIR="/etc/tjxt-node"
 readonly DEFAULT_SRC="/usr/local/src/TJXT_node"
 readonly DEFAULT_PROTOCOL="auto"
 readonly SERVICE_NAME="tjxt-node"
+readonly SERVICE_USER="tjxt-node"
 LOG_FILE="${TJXT_LOG_FILE:-/var/log/${APP_NAME}/node.log}"
 
 red='\033[0;31m'
@@ -405,6 +406,29 @@ build_binary() {
   log "已安装 $(binary_path)"
 }
 
+# The service runs as an unprivileged system user with only the capabilities it
+# needs (ports below 1024, TUN). Config, certs and logs belong to that user.
+ensure_service_user() {
+  if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    if command -v useradd >/dev/null 2>&1; then
+      useradd --system --no-create-home --home-dir "$PREFIX" --shell /usr/sbin/nologin "$SERVICE_USER"
+    elif command -v adduser >/dev/null 2>&1; then
+      addgroup -S "$SERVICE_USER" 2>/dev/null || true
+      adduser -S -D -H -h "$PREFIX" -s /sbin/nologin -G "$SERVICE_USER" "$SERVICE_USER"
+    else
+      die "无法创建系统用户 ${SERVICE_USER}（缺少 useradd/adduser）"
+    fi
+    log "已创建系统用户 ${SERVICE_USER}"
+  fi
+  local log_dir
+  log_dir="$(dirname "$(log_path)")"
+  mkdir -p "$CONFIG_DIR" "$log_dir"
+  chown -R "${SERVICE_USER}:${SERVICE_USER}" "$CONFIG_DIR" "$log_dir"
+  chmod 750 "$CONFIG_DIR" "$log_dir"
+  [[ -f "$(config_path)" ]] && chmod 600 "$(config_path)"
+  return 0
+}
+
 write_systemd_unit() {
   local unit="/etc/systemd/system/${SERVICE_NAME}.service"
   cat >"$unit" <<EOF
@@ -416,8 +440,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
 WorkingDirectory=${PREFIX}
 ExecStart=$(binary_path) server -c $(config_path)
 Restart=always
@@ -426,8 +450,12 @@ LimitNOFILE=infinity
 LimitNPROC=infinity
 TasksMax=infinity
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
-NoNewPrivileges=false
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=${CONFIG_DIR} $(dirname "$(log_path)")
+ProtectHome=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -445,6 +473,8 @@ name="${SERVICE_NAME}"
 command="$(binary_path)"
 command_args="server -c $(config_path)"
 command_background=true
+command_user="${SERVICE_USER}:${SERVICE_USER}"
+capabilities="^cap_net_bind_service,^cap_net_admin"
 pidfile="/run/${SERVICE_NAME}.pid"
 EOF
   chmod 755 "$init"
@@ -515,6 +545,7 @@ cmd_uninstall() {
 }
 
 install_service() {
+  ensure_service_user
   if has_systemd; then
     write_systemd_unit
     if [[ "$NO_START" -eq 0 ]]; then
@@ -562,12 +593,9 @@ cmd_update() {
   ensure_go
   build_binary
   install_ctl_wrapper
-  if has_systemd || has_openrc; then
-    if [[ "$NO_START" -eq 0 ]]; then
-      svc restart
-      log "已更新并重启"
-    fi
-  fi
+  # Rewrite the service unit so older root installs move to the service user.
+  install_service
+  log "已更新"
 }
 
 cmd_local() {

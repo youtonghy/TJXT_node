@@ -146,23 +146,10 @@ func (l *Lego) parseParams(path string) string {
 	return r.Replace(path)
 }
 func (l *Lego) writeCert(certificates *certificate.Resource) error {
-	err := checkPath(l.config.CertFile)
-	if err != nil {
-		return fmt.Errorf("check path error: %s", err)
-	}
-	err = os.WriteFile(l.parseParams(l.config.CertFile), certificates.Certificate, 0644)
-	if err != nil {
+	if err := writeCertFile(l.parseParams(l.config.CertFile), certificates.Certificate, 0644); err != nil {
 		return err
 	}
-	err = checkPath(l.config.KeyFile)
-	if err != nil {
-		return fmt.Errorf("check path error: %s", err)
-	}
-	err = os.WriteFile(l.parseParams(l.config.KeyFile), certificates.PrivateKey, 0644)
-	if err != nil {
-		return err
-	}
-	return nil
+	return writeCertFile(l.parseParams(l.config.KeyFile), certificates.PrivateKey, 0600)
 }
 
 type User struct {
@@ -244,7 +231,7 @@ func (u *User) Save(path string) error {
 		return fmt.Errorf("check path error: %s", err)
 	}
 	u.KeyEncoded, _ = EncodePrivate(u.key.(*ecdsa.PrivateKey))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}

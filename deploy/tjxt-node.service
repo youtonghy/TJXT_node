@@ -6,8 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=tjxt-node
+Group=tjxt-node
 WorkingDirectory=/usr/local/tjxt-node
 ExecStart=/usr/local/tjxt-node/tjxt-node server -c /etc/tjxt-node/config.json
 Restart=always
@@ -16,8 +16,12 @@ LimitNOFILE=infinity
 LimitNPROC=infinity
 TasksMax=infinity
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW
-NoNewPrivileges=false
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/etc/tjxt-node /var/log/tjxt-node
+ProtectHome=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

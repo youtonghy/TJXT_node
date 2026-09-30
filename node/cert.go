@@ -74,7 +74,10 @@ func (c *Controller) requestCert() error {
 }
 
 func generateSelfSslCertificate(domain, certPath, keyPath string) error {
-	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
 	tmpl := &x509.Certificate{
 		Version:      3,
 		SerialNumber: big.NewInt(time.Now().Unix()),
@@ -92,27 +95,26 @@ func generateSelfSslCertificate(domain, certPath, keyPath string) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(certPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert})
+	if err := writeCertFile(certPath, certPEM, 0644); err != nil {
 		return err
 	}
-	err = pem.Encode(f, &pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: cert,
-	})
-	if err != nil {
-		return err
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return writeCertFile(keyPath, keyPEM, 0600)
+}
+
+// writeCertFile writes a certificate or key file. The service runs as an
+// unprivileged user, so a path it cannot write is reported with a hint.
+func writeCertFile(p string, data []byte, perm os.FileMode) error {
+	if err := checkPath(p); err != nil {
+		return fmt.Errorf("check path error: %s", err)
 	}
-	f, err = os.OpenFile(keyPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return err
+	if err := os.WriteFile(p, data, perm); err != nil {
+		return fmt.Errorf("write %s: %w (the service user must be able to write it; keep cert paths under /etc/tjxt-node)", p, err)
 	}
-	err = pem.Encode(f, &pem.Block{
-		Type:  "EC PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(key),
-	})
-	if err != nil {
-		return err
+	// WriteFile keeps the mode of an existing file; tighten it explicitly.
+	if err := os.Chmod(p, perm); err != nil {
+		return fmt.Errorf("chmod %s: %w", p, err)
 	}
 	return nil
 }

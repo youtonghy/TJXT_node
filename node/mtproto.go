@@ -37,7 +37,11 @@ func startMTProto(info *panel.NodeInfo, users []panel.UserInfo) (*mtprotoSidecar
 	}
 	bind := listen + ":" + port
 	if path, err := exec.LookPath("mtproto-proxy"); err == nil {
-		args := []string{"-u", "nobody", "-p", "8888", "-H", port}
+		args := []string{"-p", "8888", "-H", port}
+		if os.Geteuid() == 0 {
+			// Dropping to nobody needs root; the packaged service already runs unprivileged.
+			args = append([]string{"-u", "nobody"}, args...)
+		}
 		for _, secret := range secrets {
 			args = append(args, "-S", normalizedMTProxySecret(secret))
 		}
