@@ -6,6 +6,8 @@ import (
 	"net"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
+
 	"github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/router"
 	xnet "github.com/xtls/xray-core/common/net"
@@ -175,88 +177,13 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				}
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			case "route":
-				if route.ActionValue == nil {
-					continue
-				}
-				outbound := &coreConf.OutboundDetourConfig{}
-				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
-				if err != nil {
-					continue
-				}
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"domain":      route.Match,
-					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
-					continue
-				}
-				custom_outbound, err := outbound.Build()
-				if err != nil {
-					continue
-				}
-				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
+				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "domain", route.Match)
 			case "route_ip":
-				if route.ActionValue == nil {
-					continue
-				}
-				outbound := &coreConf.OutboundDetourConfig{}
-				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
-				if err != nil {
-					continue
-				}
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"ip":          route.Match,
-					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
-					continue
-				}
-				custom_outbound, err := outbound.Build()
-				if err != nil {
-					continue
-				}
-				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
+				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "ip", route.Match)
 			case "default_out":
-				if route.ActionValue == nil {
-					continue
-				}
-				outbound := &coreConf.OutboundDetourConfig{}
-				err := json.Unmarshal([]byte(*route.ActionValue), outbound)
-				if err != nil {
-					continue
-				}
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"network":     "tcp,udp",
-					"outboundTag": outbound.Tag,
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-				if hasOutboundWithTag(coreOutboundConfig, outbound.Tag) {
-					continue
-				}
-				custom_outbound, err := outbound.Build()
-				if err != nil {
-					continue
-				}
-				coreOutboundConfig = append(coreOutboundConfig, custom_outbound)
+				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "network", "tcp,udp")
 			default:
-				continue
+				log.WithFields(log.Fields{"tag": info.Tag, "route": route.Id, "action": route.Action}).Warn("Skip route with unknown action")
 			}
 		}
 	}
@@ -286,4 +213,39 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 		return nil, nil, nil, err
 	}
 	return DnsConfig, coreOutboundConfig, RouterConfig, nil
+}
+
+// addCustomOutboundRoute handles the route, route_ip and default_out actions:
+// action_value holds an Xray outbound whose tag the new rule points at. The
+// outbound is built before the rule is added, so a route whose outbound Xray
+// rejects is skipped (and logged) instead of pointing at a missing tag.
+func addCustomOutboundRoute(outbounds []*core.OutboundHandlerConfig, rules []json.RawMessage, inboundTag string, route panel.Route, matchKey string, matchValue interface{}) ([]*core.OutboundHandlerConfig, []json.RawMessage) {
+	logger := log.WithFields(log.Fields{"tag": inboundTag, "route": route.Id, "action": route.Action})
+	if route.ActionValue == nil {
+		logger.Warn("Skip route without an outbound")
+		return outbounds, rules
+	}
+	outbound := &coreConf.OutboundDetourConfig{}
+	if err := json.Unmarshal([]byte(*route.ActionValue), outbound); err != nil {
+		logger.WithError(err).Error("Skip route: invalid outbound JSON")
+		return outbounds, rules
+	}
+	if !hasOutboundWithTag(outbounds, outbound.Tag) {
+		built, err := outbound.Build()
+		if err != nil {
+			logger.WithError(err).Error("Skip route: Xray rejected the outbound")
+			return outbounds, rules
+		}
+		outbounds = append(outbounds, built)
+	}
+	rawRule, err := json.Marshal(map[string]interface{}{
+		"inboundTag":  inboundTag,
+		matchKey:      matchValue,
+		"outboundTag": outbound.Tag,
+	})
+	if err != nil {
+		logger.WithError(err).Error("Skip route: marshal rule")
+		return outbounds, rules
+	}
+	return outbounds, append(rules, rawRule)
 }
