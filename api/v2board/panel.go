@@ -87,10 +87,11 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		}
 	})
 	client.SetBaseURL(c.APIHost)
+	// The node key travels only in the X-Server-Token header, never in the URL
+	// where proxies and access logs would record it.
 	client.SetQueryParams(map[string]string{
 		"node_type": "v3ui",
 		"node_id":   strconv.Itoa(c.NodeID),
-		"token":     c.Key,
 	})
 	return &Client{
 		client:  client,

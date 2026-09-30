@@ -126,9 +126,10 @@ func truncateBody(body []byte) string {
 	return string(body)
 }
 
+// identityParams identifies the node to the v3 gateway. The token is not part
+// of it: the gateway forwards the X-Server-Token header to the node routes.
 func identityParams(c *Client) map[string]any {
 	return map[string]any{
-		"token":     c.Token,
 		"node_id":   c.NodeId,
 		"server_id": c.NodeId,
 		"node_type": "v3ui",
