@@ -79,6 +79,14 @@ type BaseConfig struct {
 	PullInterval           any `json:"pull_interval"`
 	DeviceOnlineMinTraffic int `json:"device_online_min_traffic"`
 	NodeReportMinTraffic   int `json:"node_report_min_traffic"`
+	// AllowPrivateEgress lets users reach private, loopback, link-local and
+	// metadata addresses through this node. Absent means false.
+	AllowPrivateEgress bool `json:"allow_private_egress"`
+}
+
+// AllowsPrivateEgress reports whether the panel enabled private egress.
+func (n *NodeInfo) AllowsPrivateEgress() bool {
+	return n != nil && n.Common != nil && n.Common.BaseConfig != nil && n.Common.BaseConfig.AllowPrivateEgress
 }
 
 type TlsSettings struct {

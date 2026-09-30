@@ -2,15 +2,16 @@ package core
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"strings"
 
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
 	"github.com/xtls/xray-core/app/dns"
 	"github.com/xtls/xray-core/app/router"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	coreConf "github.com/xtls/xray-core/infra/conf"
+	panel "github.com/youtonghy/TJXT_node/api/v2board"
 )
 
 // hasPublicIPv6 checks if the machine has a public IPv6 address
@@ -42,6 +43,23 @@ func hasOutboundWithTag(list []*core.OutboundHandlerConfig, tag string) bool {
 	return false
 }
 
+// privateEgressPolicy reports whether every node allows private egress and,
+// if not, the inbound tags of the nodes that do.
+func privateEgressPolicy(infos []*panel.NodeInfo) (allowAll bool, allowTags []string) {
+	allowAll = len(infos) > 0
+	for _, info := range infos {
+		if info.AllowsPrivateEgress() {
+			allowTags = append(allowTags, info.Tag)
+		} else {
+			allowAll = false
+		}
+	}
+	if allowAll {
+		return true, nil
+	}
+	return false, allowTags
+}
+
 func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, error) {
 	//dns
 	queryStrategy := "UseIPv4v6"
@@ -59,11 +77,25 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 		QueryStrategy: queryStrategy,
 	}
 	//outbound
-	defaultoutbound, _ := buildDefaultOutbound()
+	// Private egress is per node, but nodes in one core share the fallback
+	// outbound. It allows private destinations only if every node does; nodes
+	// that allow them while others do not get their own outbound through a
+	// lowest-priority routing rule added below.
+	allowAll, allowTags := privateEgressPolicy(infos)
+	defaultoutbound, err := buildFreedomOutbound(DefaultOutboundTag, allowAll)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("build default outbound: %w", err)
+	}
 	coreOutboundConfig := append([]*core.OutboundHandlerConfig{}, defaultoutbound)
-	block, _ := buildBlockOutbound()
+	block, err := buildBlockOutbound()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("build block outbound: %w", err)
+	}
 	coreOutboundConfig = append(coreOutboundConfig, block)
-	dns, _ := buildDnsOutbound()
+	dns, err := buildDnsOutbound()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("build dns outbound: %w", err)
+	}
 	coreOutboundConfig = append(coreOutboundConfig, dns)
 
 	//route
@@ -227,6 +259,23 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				continue
 			}
 		}
+	}
+	if len(allowTags) > 0 {
+		allowOutbound, err := buildFreedomOutbound(allowPrivateOutboundTag, true)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("build private egress outbound: %w", err)
+		}
+		coreOutboundConfig = append(coreOutboundConfig, allowOutbound)
+		// Appended last so the panel's routes keep precedence.
+		rawRule, err := json.Marshal(map[string]interface{}{
+			"inboundTag":  allowTags,
+			"network":     "tcp,udp",
+			"outboundTag": allowPrivateOutboundTag,
+		})
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("marshal private egress rule: %w", err)
+		}
+		coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 	}
 	DnsConfig, err := coreDnsConfig.Build()
 	if err != nil {
