@@ -1,9 +1,12 @@
 package panel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -34,7 +37,9 @@ type AliveMap struct {
 	Alive map[int]int `json:"alive"`
 }
 
-// GetUserList will pull user from the panel
+// GetUserList pulls the user list from the panel. It returns nil (not an empty
+// slice) when the list is unchanged since the last call (HTTP 304), and a non-nil,
+// possibly empty slice when the panel sent a list.
 func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	if c.v3Available() {
 		users, err := c.getUserListV3(ctx)
@@ -53,15 +58,15 @@ func (c *Client) getUserListV3(ctx context.Context) ([]UserInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	if r.StatusCode() == 304 {
+	if r.StatusCode() == http.StatusNotModified {
 		return nil, nil
 	}
-	userlist := &UserListBody{}
-	if err := json.Unmarshal(body, userlist); err != nil {
+	users, err := decodeUserListJSON(bytes.NewReader(body))
+	if err != nil {
 		return nil, fmt.Errorf("decode v3 user list: %w", err)
 	}
 	c.userEtag = r.Header().Get("ETag")
-	return userlist.Users, nil
+	return users, nil
 }
 
 func (c *Client) getUserListV1(ctx context.Context) ([]UserInfo, error) {
@@ -80,47 +85,94 @@ func (c *Client) getUserListV1(ctx context.Context) ([]UserInfo, error) {
 	}
 	defer r.RawResponse.Body.Close()
 
-	if r.StatusCode() == 304 {
+	if r.StatusCode() == http.StatusNotModified {
 		return nil, nil
 	}
-	userlist := &UserListBody{}
-	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
-		decoder := msgpack.NewDecoder(r.RawResponse.Body)
-		if err := decoder.Decode(userlist); err != nil {
-			return nil, fmt.Errorf("decode user list error: %w", err)
-		}
+	if r.StatusCode() < 200 || r.StatusCode() >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(r.RawResponse.Body, 240))
+		return nil, fmt.Errorf("get user list: %s: %s", r.Status(), body)
+	}
+	var users []UserInfo
+	if isMsgpack(r.Header().Get("Content-Type")) {
+		users, err = decodeUserListMsgpack(r.RawResponse.Body)
 	} else {
-		dec := jsontext.NewDecoder(r.RawResponse.Body)
-		for {
-			tok, err := dec.ReadToken()
-			if err != nil {
-				return nil, fmt.Errorf("decode user list error: %w", err)
+		users, err = decodeUserListJSON(r.RawResponse.Body)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("decode user list error: %w", err)
+	}
+	c.userEtag = r.Header().Get("ETag")
+	return users, nil
+}
+
+// isMsgpack reports whether a Content-Type is msgpack; the panel answers with
+// application/msgpack, older panels with application/x-msgpack.
+func isMsgpack(contentType string) bool {
+	return strings.Contains(contentType, "application/msgpack") ||
+		strings.Contains(contentType, "application/x-msgpack")
+}
+
+var errMissingUsers = errors.New(`response has no "users" array`)
+
+// decodeUserListMsgpack decodes {"users": [...]} and returns a non-nil slice.
+func decodeUserListMsgpack(r io.Reader) ([]UserInfo, error) {
+	var body struct {
+		Users *[]UserInfo `msgpack:"users"`
+	}
+	if err := msgpack.NewDecoder(r).Decode(&body); err != nil {
+		return nil, err
+	}
+	if body.Users == nil || *body.Users == nil {
+		return nil, errMissingUsers
+	}
+	return *body.Users, nil
+}
+
+// decodeUserListJSON streams {"users": [...]} without buffering the whole list.
+// Only the top-level "users" member is used; other members are skipped even if
+// their value is the string "users". An empty array yields a non-nil empty slice.
+func decodeUserListJSON(r io.Reader) ([]UserInfo, error) {
+	dec := jsontext.NewDecoder(r)
+	tok, err := dec.ReadToken()
+	if err != nil {
+		return nil, err
+	}
+	if tok.Kind() != '{' {
+		return nil, fmt.Errorf("expected a JSON object, got %v", tok.Kind())
+	}
+	for dec.PeekKind() != '}' {
+		key, err := dec.ReadToken()
+		if err != nil {
+			return nil, err
+		}
+		if key.String() != "users" {
+			if err := dec.SkipValue(); err != nil {
+				return nil, err
 			}
-			if tok.Kind() == '"' && tok.String() == "users" {
-				break
-			}
+			continue
 		}
 		tok, err := dec.ReadToken()
 		if err != nil {
-			return nil, fmt.Errorf("decode user list error: %w", err)
+			return nil, err
 		}
 		if tok.Kind() != '[' {
-			return nil, fmt.Errorf(`decode user list error: expected "users" array`)
+			return nil, errMissingUsers
 		}
+		users := make([]UserInfo, 0)
 		for dec.PeekKind() != ']' {
 			val, err := dec.ReadValue()
 			if err != nil {
-				return nil, fmt.Errorf("decode user list error: read user object: %w", err)
+				return nil, fmt.Errorf("read user object: %w", err)
 			}
 			var u UserInfo
 			if err := json.Unmarshal(val, &u); err != nil {
-				return nil, fmt.Errorf("decode user list error: unmarshal user error: %w", err)
+				return nil, fmt.Errorf("unmarshal user error: %w", err)
 			}
-			userlist.Users = append(userlist.Users, u)
+			users = append(users, u)
 		}
+		return users, nil
 	}
-	c.userEtag = r.Header().Get("ETag")
-	return userlist.Users, nil
+	return nil, errMissingUsers
 }
 
 // GetUserAlive will fetch the alive_ip count for users

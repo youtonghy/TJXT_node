@@ -8,7 +8,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	panel "github.com/youtonghy/TJXT_node/api/v2board"
 	"github.com/youtonghy/TJXT_node/common/task"
-	vCore "github.com/youtonghy/TJXT_node/core"
 )
 
 func (c *Controller) startTasks(node *panel.NodeInfo) {
@@ -105,54 +104,15 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	if newA != nil {
 		c.limiter.AliveList = newA
 	}
-	// node no changed, check users
-	if newU == nil {
+	// nil means unchanged (304); an empty slice means the panel removed everyone.
+	if newU != nil {
+		c.desiredUsers = newU
+	} else if !c.resync {
 		log.WithField("tag", c.tag).Debug("User list no change")
 		return nil
 	}
-	deleted, added, modified := compareUserList(c.userList, newU)
-	if vCore.RebuildsOnUserChange(c.info.Type) && (len(deleted) > 0 || len(added) > 0) {
-		if c.info.Type != "mtproto" {
-			if err := c.server.DelNode(c.tag); err != nil {
-				log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Reload node failed")
-				return nil
-			}
-		}
-		if err := c.applyRuntime(c.info, newU); err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Reload users failed")
-			return nil
-		}
-	} else {
-		if len(deleted) > 0 {
-			err = c.server.DelUsers(deleted, c.tag, c.info)
-			if err != nil {
-				log.WithFields(log.Fields{
-					"tag": c.tag,
-					"err": err,
-				}).Error("Delete users failed")
-				return nil
-			}
-		}
-		if len(added) > 0 {
-			_, err = c.server.AddUsers(&vCore.AddUsersParams{
-				Tag:      c.tag,
-				NodeInfo: c.info,
-				Users:    added,
-			})
-			if err != nil {
-				log.WithFields(log.Fields{
-					"tag": c.tag,
-					"err": err,
-				}).Error("Add users failed")
-				return nil
-			}
-		}
+	if err := c.syncUsers(); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Apply user list failed, retrying on next poll")
 	}
-	if len(added) > 0 || len(deleted) > 0 || len(modified) > 0 {
-		// update Limiter
-		c.limiter.UpdateUser(c.tag, added, deleted, modified)
-	}
-	c.userList = newU
-	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	return nil
 }

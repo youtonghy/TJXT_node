@@ -2,7 +2,6 @@ package node
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -16,11 +15,14 @@ import (
 )
 
 type Controller struct {
-	server                  *core.V2Core
-	apiClient               *panel.Client
-	tag                     string
-	limiter                 *limiter.Limiter
+	server    *core.V2Core
+	apiClient *panel.Client
+	tag       string
+	limiter   *limiter.Limiter
+	// userList is the applied user list; desiredUsers the panel's latest list.
 	userList                []panel.UserInfo
+	desiredUsers            []panel.UserInfo
+	resync                  bool
 	aliveMap                map[int]int
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
@@ -59,12 +61,12 @@ func (c *Controller) Start(x *core.V2Core) error {
 		node = c.info
 	}
 	// Update user
-	c.userList, err = c.apiClient.GetUserList(context.Background())
+	users, err := c.apiClient.GetUserList(context.Background())
 	if err != nil {
 		return fmt.Errorf("get user list error: %s", err)
 	}
-	if len(c.userList) == 0 {
-		return errors.New("add users error: not have any user")
+	if users == nil {
+		users = []panel.UserInfo{}
 	}
 	c.aliveMap, err = c.apiClient.GetUserAlive(context.Background())
 	if err != nil {
@@ -72,19 +74,21 @@ func (c *Controller) Start(x *core.V2Core) error {
 	}
 	c.tag = node.Tag
 
-	// add limiter
-	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
-	c.limiter = l
+	// add limiter; syncUsers fills it with the users it applies.
+	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, nil, c.aliveMap)
 	if node.Security == panel.Tls {
 		err = c.requestCert()
 		if err != nil {
 			return fmt.Errorf("request cert error: %s", err)
 		}
 	}
-	if err := c.applyRuntime(node, c.userList); err != nil {
+	c.info = node
+	// An empty list is valid: the inbound stays down and polling brings it up
+	// as soon as the panel sends users.
+	c.desiredUsers = users
+	if err := c.syncUsers(); err != nil {
 		return err
 	}
-	c.info = node
 	c.startTasks(node)
 	return nil
 }
@@ -102,15 +106,7 @@ func (c *Controller) Close() error {
 		c.renewCertPeriodic.Close()
 	}
 	c.finalFlush()
-	if c.mtproto != nil {
-		c.mtproto.Stop()
-		c.mtproto = nil
-	}
-	if c.info != nil && c.info.Type == "mtproto" {
-		return nil
-	}
-	err := c.server.DelNode(c.tag)
-	if err != nil {
+	if err := c.stopRuntime(); err != nil {
 		return fmt.Errorf("del node error: %s", err)
 	}
 	return nil
@@ -142,44 +138,112 @@ func (c *Controller) finalFlush() {
 	}
 }
 
-func (c *Controller) applyRuntime(node *panel.NodeInfo, users []panel.UserInfo) error {
-	if node.Type == "mtproto" {
-		if len(users) == 0 {
-			if c.mtproto != nil {
-				c.mtproto.Stop()
-				c.mtproto = nil
-			}
-			log.WithField("tag", c.tag).Info("Stopped mtproto sidecar because user list is empty")
-			return nil
-		}
-		if c.mtproto != nil {
-			c.mtproto.Stop()
-			c.mtproto = nil
-		}
-		sidecar, err := startMTProto(node, users)
-		if err != nil {
-			return fmt.Errorf("start mtproto sidecar: %s", err)
-		}
-		c.mtproto = sidecar
-		log.WithField("tag", c.tag).Infof("Started mtproto sidecar for %d users", len(users))
+// syncUsers moves the runtime from the applied user list (c.userList) to the
+// panel's list (c.desiredUsers). The inbound (or mtproto sidecar) runs exactly
+// when the applied list is non-empty: the first users start it, the last removed
+// user stops it. If applying fails, the runtime is torn down and rebuilt from
+// scratch on the next poll, even if the panel then answers "unchanged".
+func (c *Controller) syncUsers() error {
+	desired := c.desiredUsers
+	deleted, added, modified := compareUserList(c.userList, desired)
+	if !c.resync && len(deleted) == 0 && len(added) == 0 && len(modified) == 0 {
 		return nil
 	}
-	if len(users) == 0 {
-		log.WithField("tag", c.tag).Info("Left inbound down because user list is empty")
+	if err := c.applyUserDiff(desired, deleted, added); err != nil {
+		c.resetRuntime()
+		return err
+	}
+	c.limiter.UpdateUser(c.tag, added, deleted, modified)
+	c.userList = desired
+	c.resync = false
+	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
+	return nil
+}
+
+func (c *Controller) applyUserDiff(desired, deleted, added []panel.UserInfo) error {
+	if c.info.Type == "mtproto" {
+		return c.syncMTProto(desired)
+	}
+	running := len(c.userList) > 0
+	if len(deleted) > 0 && running {
+		if err := c.server.DelUsers(deleted, c.tag, c.info); err != nil {
+			return fmt.Errorf("delete users error: %s", err)
+		}
+	}
+	switch {
+	case len(desired) == 0:
+		if err := c.server.DelNode(c.tag); err != nil {
+			return fmt.Errorf("stop inbound error: %s", err)
+		}
+		if running {
+			log.WithField("tag", c.tag).Info("Stopped inbound because user list is empty")
+		} else {
+			log.WithField("tag", c.tag).Info("Left inbound down because user list is empty")
+		}
+		return nil
+	case !running || c.resync || core.RebuildsOnUserChange(c.info.Type) && (len(deleted) > 0 || len(added) > 0):
+		// (Re)build the inbound with the full list; removal is idempotent.
+		if err := c.server.DelNode(c.tag); err != nil {
+			return fmt.Errorf("remove inbound error: %s", err)
+		}
+		if err := c.server.AddNode(c.tag, c.info, desired); err != nil {
+			return fmt.Errorf("add new node error: %s", err)
+		}
+		added = desired
+	}
+	if len(added) == 0 {
 		return nil
 	}
-	err := c.server.AddNode(c.tag, node, users)
-	if err != nil {
-		return fmt.Errorf("add new node error: %s", err)
-	}
-	added, err := c.server.AddUsers(&core.AddUsersParams{
+	n, err := c.server.AddUsers(&core.AddUsersParams{
 		Tag:      c.tag,
-		Users:    users,
-		NodeInfo: node,
+		Users:    added,
+		NodeInfo: c.info,
 	})
 	if err != nil {
 		return fmt.Errorf("add users error: %s", err)
 	}
-	log.WithField("tag", c.tag).Infof("Added %d new users", added)
+	log.WithField("tag", c.tag).Infof("Added %d new users", n)
 	return nil
+}
+
+func (c *Controller) syncMTProto(users []panel.UserInfo) error {
+	if c.mtproto != nil {
+		c.mtproto.Stop()
+		c.mtproto = nil
+	}
+	if len(users) == 0 {
+		log.WithField("tag", c.tag).Info("Stopped mtproto sidecar because user list is empty")
+		return nil
+	}
+	sidecar, err := startMTProto(c.info, users)
+	if err != nil {
+		return fmt.Errorf("start mtproto sidecar: %s", err)
+	}
+	c.mtproto = sidecar
+	log.WithField("tag", c.tag).Infof("Started mtproto sidecar for %d users", len(users))
+	return nil
+}
+
+// resetRuntime tears the runtime down after a failed sync so the next sync
+// rebuilds it from an empty state.
+func (c *Controller) resetRuntime() {
+	if err := c.stopRuntime(); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Stop inbound after failed user sync failed")
+	}
+	c.userList = nil
+	c.resync = true
+	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, nil, c.aliveMap)
+}
+
+// stopRuntime stops the inbound or sidecar; stopping one that is not running is
+// not an error.
+func (c *Controller) stopRuntime() error {
+	if c.mtproto != nil {
+		c.mtproto.Stop()
+		c.mtproto = nil
+	}
+	if c.server == nil || c.info == nil || c.info.Type == "mtproto" {
+		return nil
+	}
+	return c.server.DelNode(c.tag)
 }

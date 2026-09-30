@@ -93,8 +93,13 @@ func (c *Client) callV3(
 	if err := json.Unmarshal(r.Body(), &env); err != nil {
 		return r, nil, fmt.Errorf("decode v3 gateway envelope: %w", err)
 	}
-	if len(env.Data) == 0 || string(env.Data) == "null" {
+	// Panels that do not envelope responses answer with the payload itself; an
+	// explicit "data": null is an empty answer, not the payload.
+	if len(env.Data) == 0 {
 		return r, r.Body(), nil
+	}
+	if string(env.Data) == "null" {
+		return r, nil, nil
 	}
 	return r, env.Data, nil
 }

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,11 +26,13 @@ type pushRecord struct {
 // fakePanel serves the v1 node endpoints from mutable state.
 type fakePanel struct {
 	*httptest.Server
-	mu         sync.Mutex
-	config     map[string]any
-	users      []panel.UserInfo
-	pushStatus int
-	pushes     []pushRecord
+	mu          sync.Mutex
+	config      map[string]any
+	users       []panel.UserInfo
+	pushStatus  int
+	userFetches int
+	notModified int
+	pushes      []pushRecord
 }
 
 func newFakePanel(t *testing.T, protocol string, users []panel.UserInfo) *fakePanel {
@@ -59,11 +62,20 @@ func (p *fakePanel) serve(w http.ResponseWriter, r *http.Request) {
 	case "/api/v2/server/config":
 		_ = json.NewEncoder(w).Encode(p.config)
 	case "/api/v1/server/UniProxy/user":
+		p.userFetches++
 		users := p.users
 		if users == nil {
 			users = []panel.UserInfo{}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"users": users})
+		body, _ := json.Marshal(map[string]any{"users": users, "class": "users"})
+		etag := fmt.Sprintf("\"%x\"", sha256.Sum256(body))
+		if r.Header.Get("If-None-Match") == etag {
+			p.notModified++
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", etag)
+		_, _ = w.Write(body)
 	case "/api/v1/server/UniProxy/alivelist":
 		_, _ = w.Write([]byte(`{"alive":{}}`))
 	case "/api/v1/server/UniProxy/alive":
@@ -96,6 +108,12 @@ func (p *fakePanel) setPushStatus(status int) {
 	p.mu.Lock()
 	p.pushStatus = status
 	p.mu.Unlock()
+}
+
+func (p *fakePanel) NotModified() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.notModified
 }
 
 func (p *fakePanel) Pushes() []pushRecord {
