@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/youtonghy/TJXT_node/api/panel"
+	"github.com/youtonghy/TJXT_node/conf"
 )
 
 func inboundRunning(ctrl *Controller) bool {
@@ -84,5 +85,33 @@ func TestCloseIsIdempotentWhenInboundIsDown(t *testing.T) {
 	}
 	if err := ctrl.Close(); err != nil {
 		t.Fatalf("close with inbound down: %v", err)
+	}
+}
+
+func TestBrokenNodeConfigDoesNotFailStart(t *testing.T) {
+	p := newFakePanel(t, "shadowsocks", testUsers(1))
+	p.config["cipher"] = "no-such-cipher"
+	ctrl, _ := startTestController(t, p)
+	if inboundRunning(ctrl) || !ctrl.resync {
+		t.Fatalf("broken inbound: running=%v resync=%v", inboundRunning(ctrl), ctrl.resync)
+	}
+	// The next poll retries and keeps failing without stopping the controller.
+	poll(t, ctrl)
+	if inboundRunning(ctrl) || !ctrl.resync {
+		t.Fatal("a broken inbound must keep retrying")
+	}
+}
+
+func TestNewNodesDoNotSeeTheirOwnConfigAsChanged(t *testing.T) {
+	p := newFakePanel(t, "vless", testUsers(1))
+	retry := 0
+	n, err := New([]conf.NodeConfig{{APIHost: p.URL, NodeID: 1, Key: "k", Timeout: 5, RetryCount: &retry, Protocol: "v1"}})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	// A fresh client would report the unchanged config as new and reload forever.
+	info, err := n.controllers[0].apiClient.GetNodeInfo(t.Context())
+	if err != nil || info != nil {
+		t.Fatalf("unchanged config reported as new: info=%v err=%v", info != nil, err)
 	}
 }

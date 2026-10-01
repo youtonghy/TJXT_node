@@ -90,7 +90,12 @@ func (c *Controller) Start(x *core.V2Core) error {
 	// as soon as the panel sends users.
 	c.desiredUsers = users
 	if err := c.syncUsers(); err != nil {
-		return err
+		// A node whose inbound cannot be built (e.g. a bad panel config) must not
+		// take the other nodes of this process down. syncUsers left the runtime
+		// reset, so the next poll retries from scratch, and a fixed panel config
+		// reloads the node.
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).
+			Error("Apply node failed, the other nodes keep running and this one retries on the next poll")
 	}
 	c.startTasks(node)
 	return nil
