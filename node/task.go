@@ -64,9 +64,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		return nil
 	}
 	if newN != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-		}).Error("Got new node info, reload")
+		log.WithField("tag", c.tag).Info("Got new node info, reload")
 		if c.server.ReloadCh != nil {
 			select {
 			case c.server.ReloadCh <- struct{}{}:

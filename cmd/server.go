@@ -169,6 +169,12 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			current.close()
 			return
 		case <-reloadCh:
+			if retry != nil {
+				// A failed reload is already scheduled with backoff; polls that keep
+				// seeing the (still broken) new config must not bypass it.
+				log.Debug("reload requested while a retry is pending, waiting for it")
+				continue
+			}
 			log.Info("收到重启信号，正在重新加载配置...")
 			attemptReload()
 		case <-retry:

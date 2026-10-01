@@ -17,6 +17,7 @@ type Node struct {
 }
 
 func New(nodes []conf.NodeConfig) (*Node, error) {
+	clients := make([]*panel.Client, len(nodes))
 	infos := make([]*panel.NodeInfo, len(nodes))
 	for i := range nodes {
 		p, err := panel.New(&nodes[i])
@@ -27,29 +28,40 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		infos[i] = info
+		clients[i], infos[i] = p, info
 	}
-	return FromInfos(nodes, infos)
+	// The controllers keep these clients: they hold the ETag and hash of the
+	// config just fetched, so the first poll does not see it as a change.
+	return build(nodes, infos, clients), nil
 }
 
 // FromInfos builds nodes from already fetched node info without asking the
 // panel, e.g. to restart the last working configuration after a failed reload.
+// Its fresh clients report the panel's current config as new on the first poll.
 func FromInfos(nodes []conf.NodeConfig, infos []*panel.NodeInfo) (*Node, error) {
 	if len(nodes) != len(infos) {
 		return nil, fmt.Errorf("have %d node configs but %d node infos", len(nodes), len(infos))
 	}
-	n := &Node{
-		controllers: make([]*Controller, len(nodes)),
-		NodeInfos:   infos,
-	}
+	clients := make([]*panel.Client, len(nodes))
 	for i := range nodes {
 		p, err := panel.New(&nodes[i])
 		if err != nil {
 			return nil, err
 		}
-		n.controllers[i] = NewController(p, &nodes[i], infos[i])
+		clients[i] = p
 	}
-	return n, nil
+	return build(nodes, infos, clients), nil
+}
+
+func build(nodes []conf.NodeConfig, infos []*panel.NodeInfo, clients []*panel.Client) *Node {
+	n := &Node{
+		controllers: make([]*Controller, len(nodes)),
+		NodeInfos:   infos,
+	}
+	for i := range nodes {
+		n.controllers[i] = NewController(clients[i], &nodes[i], infos[i])
+	}
+	return n
 }
 
 func (n *Node) Start(nodes []conf.NodeConfig, core *core.V2Core) error {
