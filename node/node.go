@@ -17,12 +17,9 @@ type Node struct {
 }
 
 func New(nodes []conf.NodeConfig) (*Node, error) {
-	n := &Node{
-		controllers: make([]*Controller, len(nodes)),
-		NodeInfos:   make([]*panel.NodeInfo, len(nodes)),
-	}
-	for i, node := range nodes {
-		p, err := panel.New(&node)
+	infos := make([]*panel.NodeInfo, len(nodes))
+	for i := range nodes {
+		p, err := panel.New(&nodes[i])
 		if err != nil {
 			return nil, err
 		}
@@ -30,8 +27,27 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		n.controllers[i] = NewController(p, &node, info)
-		n.NodeInfos[i] = info
+		infos[i] = info
+	}
+	return FromInfos(nodes, infos)
+}
+
+// FromInfos builds nodes from already fetched node info without asking the
+// panel, e.g. to restart the last working configuration after a failed reload.
+func FromInfos(nodes []conf.NodeConfig, infos []*panel.NodeInfo) (*Node, error) {
+	if len(nodes) != len(infos) {
+		return nil, fmt.Errorf("have %d node configs but %d node infos", len(nodes), len(infos))
+	}
+	n := &Node{
+		controllers: make([]*Controller, len(nodes)),
+		NodeInfos:   infos,
+	}
+	for i := range nodes {
+		p, err := panel.New(&nodes[i])
+		if err != nil {
+			return nil, err
+		}
+		n.controllers[i] = NewController(p, &nodes[i], infos[i])
 	}
 	return n, nil
 }

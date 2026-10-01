@@ -117,10 +117,50 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
 
-	// retry fires while no instance runs, i.e. after a reload tore the old
-	// instance down and starting the new one failed.
+	// running is the configuration of current. retry re-attempts a reload that
+	// failed: while the old (or rolled-back) instance keeps serving, or while
+	// nothing runs after a rollback also failed.
+	running := next
 	var retry <-chan time.Time
 	backoff := restartBackoffMin
+	scheduleRetry := func(err error) {
+		log.WithField("err", err).Errorf("重启失败, retrying in %s", backoff)
+		retry = time.After(backoff)
+		backoff = min(backoff*2, restartBackoffMax)
+	}
+	attemptReload := func() {
+		retry = nil
+		next, err := prepare(config)
+		if err != nil {
+			if current != nil {
+				log.Warn("new config rejected, keeping the running one")
+			}
+			scheduleRetry(err)
+			return
+		}
+		applyLogConfig(next.conf)
+		current.close()
+		current = nil
+		if current, err = next.start(reloadCh); err == nil {
+			log.Info("重启成功")
+			running = next
+			backoff = restartBackoffMin
+			runtime.GC()
+			return
+		}
+		startErr := err
+		if running != nil {
+			// The old instance is gone already; bring the last working
+			// configuration back from its cached node info.
+			if inst, again, rerr := running.restart(reloadCh); rerr == nil {
+				current, running = inst, again
+				log.WithField("err", startErr).Error("new config failed to start, rolled back to the previous one")
+			} else {
+				log.WithField("err", rerr).Error("rollback to the previous config failed")
+			}
+		}
+		scheduleRetry(startErr)
+	}
 	for {
 		select {
 		case <-osSignals:
@@ -130,39 +170,9 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			return
 		case <-reloadCh:
 			log.Info("收到重启信号，正在重新加载配置...")
-			if current != nil {
-				next, err := prepare(config)
-				if err != nil {
-					log.WithField("err", err).Error("重启失败: new config rejected, keeping the running one")
-					continue
-				}
-				applyLogConfig(next.conf)
-				current.close()
-				current, err = next.start(reloadCh)
-				if err == nil {
-					log.Info("重启成功")
-					backoff = restartBackoffMin
-					retry = nil
-					runtime.GC()
-					continue
-				}
-				log.WithField("err", err).Errorf("重启失败, retrying in %s", backoff)
-				retry = time.After(backoff)
-				continue
-			}
-			// A reload request while down retries right away.
-			retry = time.After(0)
+			attemptReload()
 		case <-retry:
-			retry = nil
-			if current, err = startFresh(reloadCh); err == nil {
-				log.Info("重启成功")
-				backoff = restartBackoffMin
-				runtime.GC()
-				continue
-			}
-			backoff = min(backoff*2, restartBackoffMax)
-			log.WithField("err", err).Errorf("重启失败, retrying in %s", backoff)
-			retry = time.After(backoff)
+			attemptReload()
 		}
 	}
 }
@@ -200,13 +210,19 @@ func (p *prepared) start(reloadCh chan struct{}) (*instance, error) {
 	return inst, nil
 }
 
-func startFresh(reloadCh chan struct{}) (*instance, error) {
-	next, err := prepare(config)
+// restart starts the same configuration again with fresh controllers built
+// from the cached node info, without asking the panel.
+func (p *prepared) restart(reloadCh chan struct{}) (*instance, *prepared, error) {
+	nodes, err := node.FromInfos(p.conf.NodeConfigs, p.nodes.NodeInfos)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	applyLogConfig(next.conf)
-	return next.start(reloadCh)
+	again := &prepared{conf: p.conf, nodes: nodes}
+	inst, err := again.start(reloadCh)
+	if err != nil {
+		return nil, nil, err
+	}
+	return inst, again, nil
 }
 
 // close stops the nodes (flushing traffic) and then the core, logging errors.
