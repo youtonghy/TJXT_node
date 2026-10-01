@@ -34,6 +34,8 @@ type Controller struct {
 	// flush on Close never report or acknowledge the same batch twice.
 	trafficMu      sync.Mutex
 	pendingTraffic *core.TrafficBatch
+	// pendingRejects counts permanent rejections of pendingTraffic.
+	pendingRejects int
 }
 
 // NewController return a Node controller with default parameters.
@@ -107,7 +109,7 @@ func (c *Controller) Close() error {
 	if c.renewCertPeriodic != nil {
 		c.renewCertPeriodic.Close()
 	}
-	c.finalFlush()
+	c.flushAll("closing")
 	if err := c.stopRuntime(); err != nil {
 		return fmt.Errorf("del node error: %s", err)
 	}
@@ -117,10 +119,10 @@ func (c *Controller) Close() error {
 // finalFlushTimeout bounds the traffic report attempted while closing.
 const finalFlushTimeout = 15 * time.Second
 
-// finalFlush reports the pending batch and then all remaining traffic before the
-// inbound and its counters go away. Failures are logged; the counters are lost
-// only if the panel is unreachable during shutdown or reload.
-func (c *Controller) finalFlush() {
+// flushAll reports the pending batch and then all remaining traffic before the
+// inbound or some users' counters go away (closing, removing users). Failures
+// are logged; the counters are lost only if the panel is unreachable then.
+func (c *Controller) flushAll(reason string) {
 	if c.server == nil || c.apiClient == nil {
 		return
 	}
@@ -130,8 +132,8 @@ func (c *Controller) finalFlush() {
 	for range 2 {
 		traffic, err := c.flushTraffic(ctx, 0)
 		if err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "err": err}).
-				Error("Final traffic report failed, unreported traffic is dropped")
+			log.WithFields(log.Fields{"tag": c.tag, "reason": reason, "err": err}).
+				Error("Traffic report before removing counters failed, unreported traffic is dropped")
 			return
 		}
 		if len(traffic) == 0 {
@@ -151,6 +153,10 @@ func (c *Controller) syncUsers() error {
 	if !c.resync && len(deleted) == 0 && len(added) == 0 && len(modified) == 0 {
 		return nil
 	}
+	if len(deleted) > 0 && len(c.userList) > 0 {
+		// Removing users deletes their counters; report them first.
+		c.flushAll("removing users")
+	}
 	if err := c.applyUserDiff(desired, deleted, added); err != nil {
 		c.resetRuntime()
 		return err
@@ -164,6 +170,10 @@ func (c *Controller) syncUsers() error {
 
 func (c *Controller) applyUserDiff(desired, deleted, added []panel.UserInfo) error {
 	if c.info.Type == "mtproto" {
+		// Restarting drops every connection, so limit-only changes skip it.
+		if len(deleted) == 0 && len(added) == 0 && !c.resync {
+			return nil
+		}
 		return c.syncMTProto(desired)
 	}
 	running := len(c.userList) > 0

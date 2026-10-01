@@ -49,9 +49,10 @@ func (b *TrafficBatch) Traffic() []panel.UserTraffic {
 }
 
 // SnapshotTraffic captures the current counters of an inbound without resetting
-// them. Counters at or below minTraffic KB are left to accumulate. Counters whose
-// key does not resolve to a user ID are kept (and logged) until the user resolves
-// or is removed. It returns nil when there is nothing to report.
+// them. Counters at or below minTraffic KB are left to accumulate. A key that no
+// longer resolves to a user ID belongs to a removed user (users are mapped before
+// Xray accepts them) whose traffic was flushed before removal; such counters are
+// dropped and logged. It returns nil when there is nothing to report.
 func (vc *V2Core) SnapshotTraffic(tag string, minTraffic int) *TrafficBatch {
 	if vc.dispatcher == nil {
 		return nil
@@ -88,6 +89,9 @@ func (vc *V2Core) SnapshotTraffic(tag string, minTraffic int) *TrafficBatch {
 		return true
 	})
 	vc.users.mapLock.RUnlock()
+	for _, email := range unresolved {
+		c.Delete(email)
+	}
 	if len(unresolved) > 0 {
 		sort.Strings(unresolved)
 		logged := unresolved
@@ -98,7 +102,7 @@ func (vc *V2Core) SnapshotTraffic(tag string, minTraffic int) *TrafficBatch {
 			"tag":   tag,
 			"count": len(unresolved),
 			"keys":  logged,
-		}).Warn("Traffic counters without a known user ID are kept until the user resolves")
+		}).Warn("Dropped traffic counters of removed users")
 	}
 	if len(entries) == 0 {
 		return nil

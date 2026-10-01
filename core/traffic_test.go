@@ -51,22 +51,19 @@ func TestSnapshotDoesNotResetAndAckKeepsNewBytes(t *testing.T) {
 	}
 }
 
-func TestSnapshotKeepsUnresolvedAndSmallCounters(t *testing.T) {
+func TestSnapshotDropsRemovedUsersAndKeepsSmallCounters(t *testing.T) {
 	v, c := newTrafficTestCore(map[string]int{"u1": 1})
 	c.Tx(format.UserTag(testTag, "ghost"), 5000)
 	c.Tx(format.UserTag(testTag, "u1"), 10)
 
 	if batch := v.SnapshotTraffic(testTag, 1); batch != nil {
-		t.Fatalf("expected no batch below threshold and for unknown users, got %+v", batch)
+		t.Fatalf("expected no batch below threshold and for removed users, got %+v", batch)
 	}
-	if got := c.GetUpCount(format.UserTag(testTag, "ghost")); got != 5000 {
-		t.Fatalf("unresolved counter was dropped: %d", got)
+	if got := c.GetUpCount(format.UserTag(testTag, "ghost")); got != 0 {
+		t.Fatalf("counter of a removed user was kept: %d", got)
 	}
-	// Once the user resolves, the kept bytes are reported.
-	v.users.uidMap["ghost"] = 2
-	batch := v.SnapshotTraffic(testTag, 1)
-	if batch == nil || len(batch.Entries) != 1 || batch.Entries[0].UID != 2 {
-		t.Fatalf("unexpected batch %+v", batch)
+	if got := c.GetUpCount(format.UserTag(testTag, "u1")); got != 10 {
+		t.Fatalf("small counter must keep accumulating: %d", got)
 	}
 }
 

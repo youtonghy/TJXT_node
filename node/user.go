@@ -74,6 +74,10 @@ func (c *Controller) reportMinTraffic() int {
 	return 0
 }
 
+// maxBatchRejects is how many permanent (4xx) rejections a traffic batch gets
+// before it is dropped.
+const maxBatchRejects = 3
+
 // flushTraffic reports the pending traffic batch, or a new snapshot when nothing
 // is pending. A batch stays pending (same ID, same content) until the panel
 // acknowledges it; only then are its bytes subtracted from the live counters.
@@ -91,10 +95,27 @@ func (c *Controller) flushTraffic(ctx context.Context, minTraffic int) ([]panel.
 	userTraffic := batch.Traffic()
 	result, err := c.apiClient.ReportUserTraffic(ctx, batch.ID, userTraffic)
 	if err != nil {
+		var statusErr *panel.StatusError
+		if errors.As(err, &statusErr) && statusErr.Permanent() {
+			c.pendingRejects++
+			if c.pendingRejects >= maxBatchRejects {
+				// Resending cannot succeed and would block every later report.
+				log.WithFields(log.Fields{
+					"tag":     c.tag,
+					"batch":   batch.ID,
+					"traffic": userTraffic,
+					"err":     err,
+				}).Error("Panel keeps rejecting the traffic batch, dropping it")
+				c.server.AckTraffic(batch)
+				c.pendingTraffic = nil
+				c.pendingRejects = 0
+			}
+		}
 		return userTraffic, fmt.Errorf("batch %s: %w", batch.ID, err)
 	}
 	c.server.AckTraffic(batch)
 	c.pendingTraffic = nil
+	c.pendingRejects = 0
 	if result != nil && len(result.RejectedUserIDs) > 0 {
 		log.WithFields(log.Fields{
 			"tag":   c.tag,

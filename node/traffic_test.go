@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"testing"
 
+	panel "github.com/youtonghy/TJXT_node/api/v2board"
 	"github.com/youtonghy/TJXT_node/common/format"
 )
 
@@ -53,10 +54,58 @@ func TestCloseFlushesRemainingTraffic(t *testing.T) {
 	ctrl, x := startTestController(t, p)
 	email := format.UserTag(ctrl.tag, testUsers(1)[0].Uuid)
 	x.TrafficCounter(ctrl.tag).Tx(email, 42)
-	ctrl.finalFlush()
+	ctrl.flushAll("test")
 	pushes := p.Pushes()
 	if len(pushes) != 1 || pushes[0].Traffic["1"] != [2]int64{42, 0} {
 		t.Fatalf("final flush did not report: %+v", pushes)
+	}
+}
+
+func TestPermanentlyRejectedBatchIsDropped(t *testing.T) {
+	p := newFakePanel(t, "vless", testUsers(1))
+	ctrl, x := startTestController(t, p)
+	email := format.UserTag(ctrl.tag, testUsers(1)[0].Uuid)
+	counter := x.TrafficCounter(ctrl.tag)
+	counter.Tx(email, 10)
+
+	p.setPushStatus(http.StatusServiceUnavailable)
+	for range maxBatchRejects + 1 {
+		if _, err := ctrl.flushTraffic(t.Context(), 0); err == nil {
+			t.Fatal("expected push error")
+		}
+	}
+	if ctrl.pendingTraffic == nil {
+		t.Fatal("a retryable failure must keep the batch")
+	}
+
+	p.setPushStatus(http.StatusUnprocessableEntity)
+	for range maxBatchRejects {
+		if _, err := ctrl.flushTraffic(t.Context(), 0); err == nil {
+			t.Fatal("expected push error")
+		}
+	}
+	if ctrl.pendingTraffic != nil || counter.GetUpCount(email) != 0 {
+		t.Fatalf("rejected batch kept: pending=%v up=%d", ctrl.pendingTraffic != nil, counter.GetUpCount(email))
+	}
+
+	// Later traffic is reported again.
+	p.setPushStatus(http.StatusOK)
+	counter.Tx(email, 3)
+	if _, err := ctrl.flushTraffic(t.Context(), 0); err != nil {
+		t.Fatalf("push after drop: %v", err)
+	}
+}
+
+func TestRemovingUsersReportsTheirTrafficFirst(t *testing.T) {
+	p := newFakePanel(t, "vless", testUsers(1, 2))
+	ctrl, x := startTestController(t, p)
+	x.TrafficCounter(ctrl.tag).Tx(format.UserTag(ctrl.tag, testUsers(1)[0].Uuid), 64)
+	// A transient empty list must not lose the users' unreported traffic.
+	p.setUsers([]panel.UserInfo{})
+	poll(t, ctrl)
+	pushes := p.Pushes()
+	if len(pushes) != 1 || pushes[0].Traffic["1"] != [2]int64{64, 0} {
+		t.Fatalf("traffic of removed users was not reported: %+v", pushes)
 	}
 }
 

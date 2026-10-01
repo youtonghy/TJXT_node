@@ -305,7 +305,7 @@ func checkResponse(r *resty.Response, err error, action string) error {
 		return fmt.Errorf("%s: nil response", action)
 	}
 	if r.StatusCode() < 200 || r.StatusCode() >= 300 {
-		return fmt.Errorf("%s: %s: %s", action, r.Status(), truncateBody(r.Body()))
+		return &StatusError{Action: action, Code: r.StatusCode(), Status: r.Status(), Body: truncateBody(r.Body())}
 	}
 	return nil
 }

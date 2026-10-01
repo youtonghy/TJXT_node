@@ -94,7 +94,7 @@ func (c *Client) callV3(
 		return r, nil, errV3Unsupported
 	}
 	if r.StatusCode() >= 400 {
-		return r, nil, fmt.Errorf("v3 gateway %s: %s", r.Status(), truncateBody(r.Body()))
+		return r, nil, &StatusError{Action: "v3 gateway", Code: r.StatusCode(), Status: r.Status(), Body: truncateBody(r.Body())}
 	}
 	var env gatewayEnvelope
 	if err := json.Unmarshal(r.Body(), &env); err != nil {
@@ -117,6 +117,30 @@ func isV3Unsupported(r *resty.Response) bool {
 	body := strings.ToLower(string(r.Body()))
 	return strings.Contains(body, "not available through gateway") ||
 		strings.Contains(body, "invalid endpoint") && strings.Contains(body, "server")
+}
+
+// StatusError is a panel answer with a non-2xx HTTP status.
+type StatusError struct {
+	Action string
+	Code   int
+	Status string
+	Body   string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s: %s: %s", e.Action, e.Status, e.Body)
+}
+
+// Permanent reports whether resending the same request cannot succeed: the panel
+// rejected its content. Auth failures, missing endpoints, timeouts and rate
+// limits are retryable.
+func (e *StatusError) Permanent() bool {
+	switch e.Code {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+		http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	}
+	return e.Code >= 400 && e.Code < 500
 }
 
 func truncateBody(body []byte) string {
