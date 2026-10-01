@@ -458,6 +458,15 @@ fetch_release_assets() {
   done
 }
 
+# verify_sha256 DIR NAME requires NAME to be listed in DIR/SHA256SUMS and to match.
+verify_sha256() {
+  local dir=$1 name=$2 want got
+  want="$(awk -v n="$name" '$2 == n || $2 == "*" n { print $1; exit }' "${dir}/SHA256SUMS")"
+  [[ -n "$want" ]] || die "SHA256SUMS 中没有 ${name}，已中止安装"
+  got="$(sha256sum "${dir}/${name}" | awk '{ print $1 }')"
+  [[ "$got" == "$want" ]] || die "${name} SHA256 校验失败，已中止安装"
+}
+
 # download_release installs the release binary and deploy.sh after checking
 # both against SHA256SUMS.
 download_release() {
@@ -467,10 +476,9 @@ download_release() {
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"; trap - RETURN' RETURN
   fetch_release_assets "$tmp" SHA256SUMS "$asset" deploy.sh
-  (
-    cd "$tmp"
-    grep -E "  (${asset}|deploy\.sh)\$" SHA256SUMS | sha256sum -c - >/dev/null
-  ) || die "SHA256 校验失败，已中止安装"
+  [[ -n "${TJXT_RELEASE_BASE_URL:-}" ]] && warn "SHA256SUMS 来自镜像本身，只能发现传输损坏，无法证明文件来源"
+  verify_sha256 "$tmp" "$asset"
+  verify_sha256 "$tmp" deploy.sh
   mkdir -p "$PREFIX" /usr/local/bin
   install -m 755 "${tmp}/${asset}" "$(binary_path)"
   ln -sfn "$(binary_path)" "/usr/local/bin/${APP_NAME}"
@@ -516,13 +524,24 @@ ensure_service_user() {
     fi
     log "已创建系统用户 ${SERVICE_USER}"
   fi
-  local log_dir
-  log_dir="$(dirname "$(log_path)")"
-  mkdir -p "$CONFIG_DIR" "$log_dir"
-  chown -R "${SERVICE_USER}:${SERVICE_USER}" "$CONFIG_DIR" "$log_dir"
-  chmod 750 "$CONFIG_DIR" "$log_dir"
+  own_service_dir "$CONFIG_DIR"
+  own_service_dir "$(dirname "$(log_path)")"
   [[ -f "$(config_path)" ]] && chmod 600 "$(config_path)"
   return 0
+}
+
+# own_service_dir hands a directory to the service user. It refuses directories
+# that are not dedicated to tjxt-node, so --config-dir /etc or TJXT_LOG_FILE in
+# /var/log cannot re-own a system directory.
+own_service_dir() {
+  local dir=$1
+  case "$(basename "$dir")" in
+    *tjxt*) ;;
+    *) die "${dir} 不是 tjxt-node 专用目录（目录名需包含 tjxt），拒绝修改属主" ;;
+  esac
+  mkdir -p "$dir"
+  chown -R "${SERVICE_USER}:${SERVICE_USER}" "$dir"
+  chmod 750 "$dir"
 }
 
 write_systemd_unit() {
@@ -549,7 +568,7 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 NoNewPrivileges=true
 ProtectSystem=full
-ReadWritePaths=${CONFIG_DIR} $(dirname "$(log_path)")
+ReadWritePaths=${CONFIG_DIR} -$(dirname "$(log_path)")
 ProtectHome=true
 PrivateTmp=true
 
