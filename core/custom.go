@@ -234,8 +234,8 @@ func addCustomOutboundRoute(outbounds []*core.OutboundHandlerConfig, rules []jso
 		return outbounds, rules
 	}
 	if !hasOutboundWithTag(outbounds, outbound.Tag) {
-		if blockPrivate && strings.EqualFold(outbound.Protocol, "freedom") {
-			if err := prependPrivateBlock(outbound); err != nil {
+		if strings.EqualFold(outbound.Protocol, "freedom") {
+			if err := applyPrivateEgressPolicy(outbound, blockPrivate); err != nil {
 				logger.WithError(err).Error("Skip route: invalid freedom settings")
 				return outbounds, rules
 			}
@@ -259,9 +259,12 @@ func addCustomOutboundRoute(outbounds []*core.OutboundHandlerConfig, rules []jso
 	return outbounds, append(rules, rawRule)
 }
 
-// prependPrivateBlock puts the private-range block rule first in a freedom
-// outbound's finalRules, ahead of any rules the panel supplied.
-func prependPrivateBlock(outbound *coreConf.OutboundDetourConfig) error {
+// applyPrivateEgressPolicy makes a panel freedom outbound follow the node's
+// private-egress policy like the default outbound: blocking puts the
+// private-range block rule ahead of the panel's finalRules; allowing adds an
+// explicit allow when the panel set none, since Xray otherwise blocks private
+// destinations for vless/vmess/trojan/shadowsocks/hysteria/wireguard inbounds.
+func applyPrivateEgressPolicy(outbound *coreConf.OutboundDetourConfig, blockPrivate bool) error {
 	settings := map[string]json.RawMessage{}
 	if outbound.Settings != nil && len(*outbound.Settings) > 0 && string(*outbound.Settings) != "null" {
 		if err := json.Unmarshal(*outbound.Settings, &settings); err != nil {
@@ -274,11 +277,23 @@ func prependPrivateBlock(outbound *coreConf.OutboundDetourConfig) error {
 			return fmt.Errorf("finalRules: %w", err)
 		}
 	}
-	block, err := json.Marshal(map[string]interface{}{"action": "block", "ip": privateEgressRanges})
-	if err != nil {
-		return err
+	if !blockPrivate {
+		if len(rules) > 0 {
+			return nil
+		}
+		allow, err := json.Marshal(map[string]string{"action": "allow"})
+		if err != nil {
+			return err
+		}
+		rules = []json.RawMessage{allow}
+	} else {
+		block, err := json.Marshal(map[string]interface{}{"action": "block", "ip": privateEgressRanges})
+		if err != nil {
+			return err
+		}
+		rules = append([]json.RawMessage{block}, rules...)
 	}
-	merged, err := json.Marshal(append([]json.RawMessage{block}, rules...))
+	merged, err := json.Marshal(rules)
 	if err != nil {
 		return err
 	}

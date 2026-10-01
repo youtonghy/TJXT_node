@@ -82,6 +82,8 @@ Xray inbound builders start:
 - `tunnel` (dokodemo-door)
 - `tun` (no host route rewrite)
 
+Shadowsocks 2022 takes its server PSK from the config's `server_key`; user keys are the first key-length bytes of the uuid. REALITY on current Xray only accepts clients that send an X25519MLKEM768 key share. A node whose inbound cannot be built is logged and retried on every poll without stopping the other nodes. The panel repo's `scripts/docker_node_e2e.py` exercises every protocol and route action with real clients in Docker.
+
 `mtproto` is retired: the panel no longer creates such nodes and the agent refuses their config.
 
 WireGuard keys stay derived from the panel user uuid so the user list remains `{id, uuid, speed_limit, device_limit}`.

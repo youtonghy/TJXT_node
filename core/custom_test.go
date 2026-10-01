@@ -79,3 +79,17 @@ func TestCustomFreedomOutboundBlocksPrivateEgress(t *testing.T) {
 		})
 	}
 }
+
+func TestCustomFreedomOutboundAllowsPrivateWhenNodeAllows(t *testing.T) {
+	custom := `{"tag":"custom-redirect","protocol":"freedom","settings":{"redirect":"10.0.0.2:80"}}`
+	info := nodeWithEgress("in", `{"allow_private_egress":true}`)
+	info.Common.Routes = []panel.Route{{Id: 1, Action: "default_out", ActionValue: &custom}}
+	_, outbounds, _, err := GetCustomConfig([]*panel.NodeInfo{info})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	c := freedomConfig(t, outbounds, "custom-redirect")
+	if c == nil || !allowsAll(c) {
+		t.Fatalf("expected an explicit allow-all rule, got %v", c.GetFinalRules())
+	}
+}

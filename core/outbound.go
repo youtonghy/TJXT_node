@@ -60,8 +60,11 @@ func buildFreedomOutbound(tag string, allowPrivate bool) (*core.OutboundHandlerC
 		rule = &conf.FreedomFinalRuleConfig{Action: "block", IP: &ips}
 	}
 	proxySetting := &conf.FreedomConfig{
-		DomainStrategy: "UseIPv4v6",
-		FinalRules:     []*conf.FreedomFinalRuleConfig{rule},
+		FinalRules: []*conf.FreedomFinalRuleConfig{rule},
+	}
+	// freedom.domainStrategy is deprecated in favour of sockopt.domainStrategy.
+	outboundDetourConfig.StreamSetting = &conf.StreamConfig{
+		SocketSettings: &conf.SocketConfig{DomainStrategy: "UseIPv4v6"},
 	}
 	var setting json.RawMessage
 	setting, err := json.Marshal(proxySetting)
