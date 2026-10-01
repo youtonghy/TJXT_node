@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 	"github.com/youtonghy/TJXT_node/conf"
 	"github.com/youtonghy/TJXT_node/core"
 )

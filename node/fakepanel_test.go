@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 	"github.com/youtonghy/TJXT_node/conf"
 	"github.com/youtonghy/TJXT_node/core"
 	"github.com/youtonghy/TJXT_node/limiter"

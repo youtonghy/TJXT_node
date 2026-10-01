@@ -13,7 +13,7 @@ import (
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	coreConf "github.com/xtls/xray-core/infra/conf"
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 )
 
 // hasPublicIPv6 checks if the machine has a public IPv6 address

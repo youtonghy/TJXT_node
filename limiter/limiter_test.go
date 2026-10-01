@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 	"github.com/youtonghy/TJXT_node/common/format"
 )
 

@@ -6,7 +6,7 @@ import (
 
 	"github.com/xtls/xray-core/common"
 
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 )
 
 func (v *V2Core) AddNode(tag string, info *panel.NodeInfo, users []panel.UserInfo) error {

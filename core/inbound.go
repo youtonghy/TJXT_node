@@ -17,7 +17,7 @@ import (
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/infra/conf"
 	coreConf "github.com/xtls/xray-core/infra/conf"
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 )
 
 type NetworkSettingsProxyProtocol struct {

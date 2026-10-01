@@ -13,7 +13,7 @@ import (
 	"github.com/xtls/xray-core/features/outbound"
 	"github.com/xtls/xray-core/features/routing"
 	coreConf "github.com/xtls/xray-core/infra/conf"
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 	"github.com/youtonghy/TJXT_node/conf"
 	"github.com/youtonghy/TJXT_node/core/app/dispatcher"
 	_ "github.com/youtonghy/TJXT_node/core/distro/all"

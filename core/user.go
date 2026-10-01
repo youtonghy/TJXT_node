@@ -18,7 +18,7 @@ import (
 	"github.com/xtls/xray-core/proxy/trojan"
 	"github.com/xtls/xray-core/proxy/tuic"
 	"github.com/xtls/xray-core/proxy/vless"
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 	"github.com/youtonghy/TJXT_node/common/counter"
 	"github.com/youtonghy/TJXT_node/common/format"
 	"github.com/youtonghy/TJXT_node/core/app/dispatcher"

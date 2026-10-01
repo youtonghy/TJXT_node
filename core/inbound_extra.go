@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	coreConf "github.com/xtls/xray-core/infra/conf"
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 	"github.com/youtonghy/TJXT_node/common/crypt"
 	"github.com/youtonghy/TJXT_node/common/format"
 )

@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/xtls/xray-core/proxy/freedom"
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
+	"github.com/youtonghy/TJXT_node/api/panel"
 )
 
 func TestCustomOutboundRoutes(t *testing.T) {
