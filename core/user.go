@@ -217,15 +217,7 @@ func buildSSUser(tag string, userInfo *panel.UserInfo, cypher string, serverKey 
 			Account: serial.ToTypedMessage(ssAccount),
 		}
 	} else {
-		var keyLength int
-		switch cypher {
-		case "2022-blake3-aes-128-gcm":
-			keyLength = 16
-		case "2022-blake3-aes-256-gcm":
-			keyLength = 32
-		case "2022-blake3-chacha20-poly1305":
-			keyLength = 32
-		}
+		keyLength := ss2022KeyLen(cypher)
 		ssAccount := &shadowsocks_2022.Account{
 			Key: base64.StdEncoding.EncodeToString([]byte(userInfo.Uuid[:keyLength])),
 		}
@@ -235,6 +227,15 @@ func buildSSUser(tag string, userInfo *panel.UserInfo, cypher string, serverKey 
 			Account: serial.ToTypedMessage(ssAccount),
 		}
 	}
+}
+
+// ss2022KeyLen is the key length of a Shadowsocks 2022 cipher (32 for unknown
+// ones, the longest, so slicing a 32-byte buffer stays in range).
+func ss2022KeyLen(cipher string) int {
+	if strings.EqualFold(cipher, "2022-blake3-aes-128-gcm") {
+		return 16
+	}
+	return 32
 }
 
 func getCipherFromString(c string) shadowsocks.CipherType {

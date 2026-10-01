@@ -382,7 +382,8 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	cipher := s.Cipher
 	if s.ServerKey != "" {
 		settings.Password = s.ServerKey
-		randomPasswd = base64.StdEncoding.EncodeToString([]byte(randomPasswd))
+		// Shadowsocks 2022 user keys must have the cipher's key length.
+		randomPasswd = base64.StdEncoding.EncodeToString(p[:ss2022KeyLen(s.Cipher)])
 		cipher = ""
 	}
 	defaultSSuser := &coreConf.ShadowsocksUserConfig{
@@ -468,7 +469,11 @@ func buildHysteria2(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourCon
 		}
 	}
 	if s.Obfs != "" && s.ObfsPassword != "" {
-		rawobfsJSON := json.RawMessage(fmt.Sprintf(`{"password":"%s"}`, s.ObfsPassword))
+		obfs, err := json.Marshal(map[string]string{"password": s.ObfsPassword})
+		if err != nil {
+			return fmt.Errorf("marshal hysteria2 obfs settings error: %s", err)
+		}
+		rawobfsJSON := json.RawMessage(obfs)
 		finalmask.Udp = []conf.Mask{
 			{
 				Type:     s.Obfs,
