@@ -1,0 +1,40 @@
+name: Release
+
+# Push a tag such as v0.1.0 to publish linux binaries, deploy.sh and
+# SHA256SUMS. deploy.sh installs from these assets by default.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  GOEXPERIMENT: jsonv2
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: CGO_ENABLED=1 go test -race -count=1 ./...
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          ldflags="-s -w -X github.com/youtonghy/TJXT_node/cmd.version=${GITHUB_REF_NAME}"
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "$ldflags" \
+              -o "dist/tjxt-node-linux-${arch}" .
+          done
+          cp deploy.sh dist/deploy.sh
+          (cd dist && sha256sum tjxt-node-linux-* deploy.sh > SHA256SUMS)
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes

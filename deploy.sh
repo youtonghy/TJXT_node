@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # TJXT_node one-click deploy for TONG-ladder.
-# Builds from source (GOEXPERIMENT=jsonv2) and installs a systemd/openrc service.
+# Downloads a release binary (or builds from source) and installs a systemd/openrc service.
 set -euo pipefail
 
 readonly APP_NAME="tjxt-node"
 readonly DEFAULT_REPO="https://github.com/youtonghy/TJXT_node.git"
+readonly DEFAULT_GITHUB_REPO="youtonghy/TJXT_node"
 readonly DEFAULT_BRANCH="main"
 readonly DEFAULT_GO_VERSION="1.27.1"
 readonly DEFAULT_PREFIX="/usr/local/tjxt-node"
@@ -31,6 +32,9 @@ REPO="${TJXT_REPO:-$DEFAULT_REPO}"
 PREFIX="${TJXT_PREFIX:-$DEFAULT_PREFIX}"
 CONFIG_DIR="${TJXT_CONFIG_DIR:-$DEFAULT_CONFIG_DIR}"
 SRC_OVERRIDE="${TJXT_SRC:-}"
+GITHUB_REPO="${TJXT_GITHUB_REPO:-$DEFAULT_GITHUB_REPO}"
+VERSION="${TJXT_VERSION:-latest}"
+BUILD_FROM_SOURCE=0
 FORCE_CONFIG=0
 NO_START=0
 YES=0
@@ -53,7 +57,7 @@ TJXT_node 一键部署（TONG-ladder 节点）
 
 子命令:
   install      安装或更新（默认）
-  update       拉取源码并更新二进制
+  update       更新二进制（默认下载最新 Release）
   start|stop|restart|status|log
   uninstall    卸载服务和二进制（默认保留配置）
   local        仅本地编译，不安装 systemd
@@ -64,9 +68,11 @@ TJXT_node 一键部署（TONG-ladder 节点）
   --node-id N               面板节点 ID
   --api-key KEY             节点 server_key（X-Server-Token）
   --protocol auto|v3ui|v1   对接协议，默认 auto
-  --branch NAME             源码分支，默认 main
+  --version TAG             Release 版本，默认 latest
+  --build                   从源码编译，而不是下载 Release 二进制
+  --branch NAME             源码分支（编译模式），默认 main
   --repo URL                Git 仓库地址
-  --source DIR              使用已有源码目录
+  --source DIR              使用已有源码目录编译
   --prefix DIR              安装目录，默认 /usr/local/tjxt-node
   --config-dir DIR          配置目录，默认 /etc/tjxt-node
   --force-config            覆盖已有配置
@@ -75,7 +81,9 @@ TJXT_node 一键部署（TONG-ladder 节点）
   --purge                   卸载时同时删除配置和日志
   -h, --help                显示帮助
 
-环境变量: TJXT_API_HOST TJXT_NODE_ID TJXT_API_KEY TJXT_PROTOCOL GOPROXY
+环境变量: TJXT_API_HOST TJXT_NODE_ID TJXT_API_KEY TJXT_PROTOCOL TJXT_VERSION GOPROXY
+私有仓库: 导出 GITHUB_TOKEN（需 repo 读权限）后通过 GitHub API 下载 Release。
+镜像: TJXT_RELEASE_BASE_URL 指向提供相同文件名的下载地址（含 SHA256SUMS）。
 国内编译可设: GOPROXY=https://goproxy.cn,direct
 
 本脚本不会关闭防火墙、不会上报统计。节点监听端口由面板下发，请自行放行。
@@ -155,6 +163,12 @@ parse_args() {
         REPO="${2:-}"; shift 2 ;;
       --repo=*)
         REPO="${1#*=}"; shift ;;
+      --version)
+        VERSION="${2:-}"; shift 2 ;;
+      --version=*)
+        VERSION="${1#*=}"; shift ;;
+      --build)
+        BUILD_FROM_SOURCE=1; shift ;;
       --source)
         SRC_OVERRIDE="${2:-}"; shift 2 ;;
       --source=*)
@@ -202,7 +216,9 @@ ensure_commands() {
   for c in "$@"; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
   done
-  ((${#missing[@]})) && die "缺少命令: ${missing[*]}"
+  if ((${#missing[@]})); then
+    die "缺少命令: ${missing[*]}"
+  fi
 }
 
 install_build_deps() {
@@ -244,7 +260,7 @@ ensure_go() {
   tarball="go${DEFAULT_GO_VERSION}.${os}-${arch}.tar.gz"
   dest="/usr/local/go"
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
+  trap 'rm -rf "$tmp"; trap - RETURN' RETURN
   log "安装 Go ${DEFAULT_GO_VERSION} 到 ${dest}"
   local url ok=0
   for url in \
@@ -382,6 +398,86 @@ EOF
   log "写入配置 $cfg"
 }
 
+# Source builds are used with --build/--source or when deploy.sh runs from a
+# checkout; otherwise the release binary is downloaded.
+wants_source_build() {
+  [[ "$BUILD_FROM_SOURCE" -eq 1 || -n "$SRC_OVERRIDE" ]] && return 0
+  local dir
+  dir="$(script_dir || true)"
+  [[ -n "$dir" && -f "$dir/go.mod" ]]
+}
+
+install_download_deps() {
+  local pkgs=(curl ca-certificates)
+  [[ -n "${GITHUB_TOKEN:-}" ]] && pkgs+=(jq)
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -y
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y "${pkgs[@]}"
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y "${pkgs[@]}"
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache "${pkgs[@]}"
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm "${pkgs[@]}"
+  fi
+  ensure_commands curl sha256sum
+  [[ -n "${GITHUB_TOKEN:-}" ]] && ensure_commands jq
+  return 0
+}
+
+# fetch_release_assets DIR NAME... downloads release assets into DIR. Without
+# GITHUB_TOKEN it uses the public download URLs; with it, the GitHub API
+# (required while the repository is private).
+fetch_release_assets() {
+  local dir=$1 name
+  shift
+  if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+    local base="https://github.com/${GITHUB_REPO}/releases/latest/download"
+    [[ "$VERSION" != "latest" ]] && base="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}"
+    # A mirror serving the same asset names can replace GitHub.
+    [[ -n "${TJXT_RELEASE_BASE_URL:-}" ]] && base="${TJXT_RELEASE_BASE_URL%/}"
+    for name in "$@"; do
+      log "下载 ${base}/${name}"
+      curl -fL --retry 3 --retry-delay 2 -o "${dir}/${name}" "${base}/${name}" \
+        || die "下载 ${name} 失败（仓库私有时请导出 GITHUB_TOKEN，或用 --build 从源码编译）"
+    done
+    return
+  fi
+  local api="https://api.github.com/repos/${GITHUB_REPO}/releases/latest" release url
+  [[ "$VERSION" != "latest" ]] && api="https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${VERSION}"
+  release="$(curl -fsSL --retry 3 -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" "$api")" || die "查询 Release 失败: $api"
+  for name in "$@"; do
+    url="$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .url' <<<"$release")"
+    [[ -n "$url" && "$url" != "null" ]] || die "Release 中没有 ${name}"
+    log "下载 ${name}（$(jq -r '.tag_name' <<<"$release")）"
+    curl -fL --retry 3 --retry-delay 2 -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+      -H "Accept: application/octet-stream" -o "${dir}/${name}" "$url" || die "下载 ${name} 失败"
+  done
+}
+
+# download_release installs the release binary and deploy.sh after checking
+# both against SHA256SUMS.
+download_release() {
+  local asset tmp
+  asset="${APP_NAME}-linux-$(go_arch)"
+  [[ "$(os_id)" == "linux" ]] || die "Release 只提供 Linux 二进制，其他系统请用 --build"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"; trap - RETURN' RETURN
+  fetch_release_assets "$tmp" SHA256SUMS "$asset" deploy.sh
+  (
+    cd "$tmp"
+    grep -E "  (${asset}|deploy\.sh)\$" SHA256SUMS | sha256sum -c - >/dev/null
+  ) || die "SHA256 校验失败，已中止安装"
+  mkdir -p "$PREFIX" /usr/local/bin
+  install -m 755 "${tmp}/${asset}" "$(binary_path)"
+  ln -sfn "$(binary_path)" "/usr/local/bin/${APP_NAME}"
+  install -m 755 "${tmp}/deploy.sh" "${PREFIX}/deploy.sh"
+  log "已安装 $(binary_path)（$("$(binary_path)" version 2>/dev/null | head -n 1 || echo unknown)）"
+}
+
 build_binary() {
   ensure_commands git
   [[ -f "$SRC/go.mod" ]] || die "源码不完整: $SRC"
@@ -484,7 +580,9 @@ EOF
 
 install_ctl_wrapper() {
   local ctl="/usr/local/sbin/tjxt-node-deploy"
-  install -m 755 "$SRC/deploy.sh" "$ctl"
+  local script="${PREFIX}/deploy.sh"
+  [[ -n "$SRC" ]] && script="$SRC/deploy.sh"
+  install -m 755 "$script" "$ctl"
   log "管理命令: ${ctl} start|stop|restart|status|log|update"
 }
 
@@ -566,11 +664,17 @@ install_service() {
 
 cmd_install() {
   need_root
-  install_build_deps
-  resolve_source "$@"
-  ensure_go
-  prompt_install_fields
-  build_binary
+  if wants_source_build; then
+    install_build_deps
+    resolve_source "$@"
+    ensure_go
+    prompt_install_fields
+    build_binary
+  else
+    install_download_deps
+    prompt_install_fields
+    download_release
+  fi
   write_config
   install_ctl_wrapper
   install_service
@@ -585,13 +689,18 @@ cmd_install() {
 
 cmd_update() {
   need_root
-  install_build_deps
-  resolve_source "$@"
-  if [[ -z "$SRC_OVERRIDE" && "$SRC" == "$DEFAULT_SRC" ]]; then
-    clone_or_update_src "$SRC"
+  if wants_source_build; then
+    install_build_deps
+    resolve_source "$@"
+    if [[ -z "$SRC_OVERRIDE" && "$SRC" == "$DEFAULT_SRC" ]]; then
+      clone_or_update_src "$SRC"
+    fi
+    ensure_go
+    build_binary
+  else
+    install_download_deps
+    download_release
   fi
-  ensure_go
-  build_binary
   install_ctl_wrapper
   # Rewrite the service unit so older root installs move to the service user.
   install_service
