@@ -1,9 +1,9 @@
 syntax = "proto3";
 
-package v2node.core.app.dispatcher;
-option csharp_namespace = "V2node.core.app.dispatcher";
+package tjxt.core.app.dispatcher;
+option csharp_namespace = "Tjxt.core.app.dispatcher";
 option go_package = "github.com/youtonghy/TJXT_node/core/app/dispatcher";
-option java_package = "com.v2node.core.app.dispatcher";
+option java_package = "com.tjxt.core.app.dispatcher";
 option java_multiple_files = true;
 
 message SessionConfig {
