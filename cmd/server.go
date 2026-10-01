@@ -32,7 +32,7 @@ const (
 
 var serverCommand = cobra.Command{
 	Use:   "server",
-	Short: "Run v2node server",
+	Short: "Run the tjxt-node server",
 	Run:   serverHandle,
 	Args:  cobra.NoArgs,
 }

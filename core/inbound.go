@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	panel "github.com/youtonghy/TJXT_node/api/v2board"
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/inbound"
 	"github.com/xtls/xray-core/infra/conf"
 	coreConf "github.com/xtls/xray-core/infra/conf"
+	panel "github.com/youtonghy/TJXT_node/api/v2board"
 )
 
 type NetworkSettingsProxyProtocol struct {
