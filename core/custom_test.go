@@ -3,6 +3,7 @@ package core
 import (
 	"testing"
 
+	"github.com/xtls/xray-core/proxy/freedom"
 	panel "github.com/youtonghy/TJXT_node/api/v2board"
 )
 
@@ -43,5 +44,38 @@ func TestCustomOutboundRoutes(t *testing.T) {
 	}
 	if targets["bad-out"] != 0 {
 		t.Fatalf("no rule may point at a rejected outbound, got %v", targets)
+	}
+}
+
+func TestCustomFreedomOutboundBlocksPrivateEgress(t *testing.T) {
+	custom := `{"tag":"custom-direct","protocol":"freedom","settings":{"finalRules":[{"action":"allow"}]}}`
+	for _, tc := range []struct {
+		name       string
+		baseConfig string
+		block      bool
+	}{
+		{name: "default", baseConfig: "", block: true},
+		{name: "allowed", baseConfig: `{"allow_private_egress":true}`, block: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := nodeWithEgress("in", tc.baseConfig)
+			info.Common.Routes = []panel.Route{{Id: 1, Action: "default_out", ActionValue: &custom}}
+			_, outbounds, _, err := GetCustomConfig([]*panel.NodeInfo{info})
+			if err != nil {
+				t.Fatalf("build: %v", err)
+			}
+			c := freedomConfig(t, outbounds, "custom-direct")
+			if c == nil {
+				t.Fatal("custom outbound missing")
+			}
+			rules := c.GetFinalRules()
+			blocked := len(rules) == 2 && rules[0].GetAction() == freedom.RuleAction_Block && len(rules[0].GetIp()) > 0
+			if tc.block != blocked {
+				t.Fatalf("block=%v, rules=%v", tc.block, rules)
+			}
+			if !tc.block && (len(rules) != 1 || rules[0].GetAction() != freedom.RuleAction_Allow) {
+				t.Fatalf("panel rules must stay untouched when allowed: %v", rules)
+			}
+		})
 	}
 }

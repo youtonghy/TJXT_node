@@ -177,11 +177,11 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 				}
 				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
 			case "route":
-				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "domain", route.Match)
+				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "domain", route.Match, !allowAll)
 			case "route_ip":
-				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "ip", route.Match)
+				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "ip", route.Match, !allowAll)
 			case "default_out":
-				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "network", "tcp,udp")
+				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "network", "tcp,udp", !allowAll)
 			default:
 				log.WithFields(log.Fields{"tag": info.Tag, "route": route.Id, "action": route.Action}).Warn("Skip route with unknown action")
 			}
@@ -219,7 +219,10 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 // action_value holds an Xray outbound whose tag the new rule points at. The
 // outbound is built before the rule is added, so a route whose outbound Xray
 // rejects is skipped (and logged) instead of pointing at a missing tag.
-func addCustomOutboundRoute(outbounds []*core.OutboundHandlerConfig, rules []json.RawMessage, inboundTag string, route panel.Route, matchKey string, matchValue interface{}) ([]*core.OutboundHandlerConfig, []json.RawMessage) {
+//
+// Custom freedom outbounds are shared by tag across nodes, so they block private
+// destinations unless every node in the core allows private egress.
+func addCustomOutboundRoute(outbounds []*core.OutboundHandlerConfig, rules []json.RawMessage, inboundTag string, route panel.Route, matchKey string, matchValue interface{}, blockPrivate bool) ([]*core.OutboundHandlerConfig, []json.RawMessage) {
 	logger := log.WithFields(log.Fields{"tag": inboundTag, "route": route.Id, "action": route.Action})
 	if route.ActionValue == nil {
 		logger.Warn("Skip route without an outbound")
@@ -231,6 +234,12 @@ func addCustomOutboundRoute(outbounds []*core.OutboundHandlerConfig, rules []jso
 		return outbounds, rules
 	}
 	if !hasOutboundWithTag(outbounds, outbound.Tag) {
+		if blockPrivate && strings.EqualFold(outbound.Protocol, "freedom") {
+			if err := prependPrivateBlock(outbound); err != nil {
+				logger.WithError(err).Error("Skip route: invalid freedom settings")
+				return outbounds, rules
+			}
+		}
 		built, err := outbound.Build()
 		if err != nil {
 			logger.WithError(err).Error("Skip route: Xray rejected the outbound")
@@ -248,4 +257,37 @@ func addCustomOutboundRoute(outbounds []*core.OutboundHandlerConfig, rules []jso
 		return outbounds, rules
 	}
 	return outbounds, append(rules, rawRule)
+}
+
+// prependPrivateBlock puts the private-range block rule first in a freedom
+// outbound's finalRules, ahead of any rules the panel supplied.
+func prependPrivateBlock(outbound *coreConf.OutboundDetourConfig) error {
+	settings := map[string]json.RawMessage{}
+	if outbound.Settings != nil && len(*outbound.Settings) > 0 && string(*outbound.Settings) != "null" {
+		if err := json.Unmarshal(*outbound.Settings, &settings); err != nil {
+			return err
+		}
+	}
+	var rules []json.RawMessage
+	if raw, ok := settings["finalRules"]; ok && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &rules); err != nil {
+			return fmt.Errorf("finalRules: %w", err)
+		}
+	}
+	block, err := json.Marshal(map[string]interface{}{"action": "block", "ip": privateEgressRanges})
+	if err != nil {
+		return err
+	}
+	merged, err := json.Marshal(append([]json.RawMessage{block}, rules...))
+	if err != nil {
+		return err
+	}
+	settings["finalRules"] = merged
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	msg := json.RawMessage(raw)
+	outbound.Settings = &msg
+	return nil
 }
