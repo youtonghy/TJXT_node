@@ -239,3 +239,10 @@ require (
 )
 
 replace github.com/xtls/xray-core v1.260711.0 => github.com/wyx2685/xray-core v0.0.0-20260930151924-e087e74a1bf2
+
+// Pinned to the commit before XTLS/REALITY started rejecting Client Hellos without an
+// X25519MLKEM768 key share (2026-09-08), which locks out sing-box and mihomo clients.
+// minClientVer cannot help: that check runs after the key-share check. Drop this pin
+// once those clients send X25519MLKEM768 (scripts/docker_node_e2e.py in the panel repo
+// checks REALITY with sing-box).
+replace github.com/xtls/reality => github.com/xtls/reality v0.0.0-20260908045812-e1986a4d31ca
