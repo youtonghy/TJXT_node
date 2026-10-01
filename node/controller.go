@@ -26,7 +26,6 @@ type Controller struct {
 	aliveMap                map[int]int
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
-	mtproto                 *mtprotoSidecar
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
@@ -143,7 +142,7 @@ func (c *Controller) flushAll(reason string) {
 }
 
 // syncUsers moves the runtime from the applied user list (c.userList) to the
-// panel's list (c.desiredUsers). The inbound (or mtproto sidecar) runs exactly
+// panel's list (c.desiredUsers). The inbound runs exactly
 // when the applied list is non-empty: the first users start it, the last removed
 // user stops it. If applying fails, the runtime is torn down and rebuilt from
 // scratch on the next poll, even if the panel then answers "unchanged".
@@ -169,13 +168,6 @@ func (c *Controller) syncUsers() error {
 }
 
 func (c *Controller) applyUserDiff(desired, deleted, added []panel.UserInfo) error {
-	if c.info.Type == "mtproto" {
-		// Restarting drops every connection, so limit-only changes skip it.
-		if len(deleted) == 0 && len(added) == 0 && !c.resync {
-			return nil
-		}
-		return c.syncMTProto(desired)
-	}
 	running := len(c.userList) > 0
 	if len(deleted) > 0 && running {
 		if err := c.server.DelUsers(deleted, c.tag, c.info); err != nil {
@@ -218,24 +210,6 @@ func (c *Controller) applyUserDiff(desired, deleted, added []panel.UserInfo) err
 	return nil
 }
 
-func (c *Controller) syncMTProto(users []panel.UserInfo) error {
-	if c.mtproto != nil {
-		c.mtproto.Stop()
-		c.mtproto = nil
-	}
-	if len(users) == 0 {
-		log.WithField("tag", c.tag).Info("Stopped mtproto sidecar because user list is empty")
-		return nil
-	}
-	sidecar, err := startMTProto(c.info, users)
-	if err != nil {
-		return fmt.Errorf("start mtproto sidecar: %s", err)
-	}
-	c.mtproto = sidecar
-	log.WithField("tag", c.tag).Infof("Started mtproto sidecar for %d users", len(users))
-	return nil
-}
-
 // resetRuntime tears the runtime down after a failed sync so the next sync
 // rebuilds it from an empty state.
 func (c *Controller) resetRuntime() {
@@ -249,14 +223,9 @@ func (c *Controller) resetRuntime() {
 	c.resync = true
 }
 
-// stopRuntime stops the inbound or sidecar; stopping one that is not running is
-// not an error.
+// stopRuntime stops the inbound; stopping one that is not running is not an error.
 func (c *Controller) stopRuntime() error {
-	if c.mtproto != nil {
-		c.mtproto.Stop()
-		c.mtproto = nil
-	}
-	if c.server == nil || c.info == nil || c.info.Type == "mtproto" {
+	if c.server == nil || c.info == nil {
 		return nil
 	}
 	return c.server.DelNode(c.tag)

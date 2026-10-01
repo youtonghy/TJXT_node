@@ -238,7 +238,7 @@ func mergeJSONMap(dst map[string]any, raw json.RawMessage) {
 
 func RebuildsOnUserChange(nodeType string) bool {
 	switch nodeType {
-	case "http", "mixed", "wireguard", "mtproto":
+	case "http", "mixed", "wireguard":
 		return true
 	default:
 		return false

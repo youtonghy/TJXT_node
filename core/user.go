@@ -310,7 +310,7 @@ func buildAnyTLSUser(tag string, userInfo *panel.UserInfo) (user *protocol.User)
 
 func staticAccountProtocol(nodeType string) bool {
 	switch nodeType {
-	case "http", "mixed", "tunnel", "tun", "wireguard", "mtproto":
+	case "http", "mixed", "tunnel", "tun", "wireguard":
 		return true
 	default:
 		return false

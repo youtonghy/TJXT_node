@@ -10,9 +10,6 @@ import (
 )
 
 func (v *V2Core) AddNode(tag string, info *panel.NodeInfo, users []panel.UserInfo) error {
-	if info != nil && info.Type == "mtproto" {
-		return nil
-	}
 	inBoundConfig, err := buildInbound(info, tag, users)
 	if err != nil {
 		return fmt.Errorf("build inbound error: %s", err)

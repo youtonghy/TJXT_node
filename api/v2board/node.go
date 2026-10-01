@@ -183,7 +183,7 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 	}
 	switch cm.Protocol {
 	case "vmess", "trojan", "hysteria2", "hysteria", "tuic", "anytls", "vless",
-		"wireguard", "http", "mixed", "tunnel", "tun", "mtproto":
+		"wireguard", "http", "mixed", "tunnel", "tun":
 		node.Type = cm.Protocol
 		if node.Type == "hysteria" {
 			node.Type = "hysteria2"
@@ -192,6 +192,8 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 	case "shadowsocks":
 		node.Type = cm.Protocol
 		node.Security = 0
+	case "mtproto":
+		return nil, fmt.Errorf("mtproto nodes are retired; delete this node in the panel")
 	default:
 		return nil, fmt.Errorf("unsupport protocol: %s", cm.Protocol)
 	}

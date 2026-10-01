@@ -82,6 +82,6 @@ Xray inbound builders start:
 - `tunnel` (dokodemo-door)
 - `tun` (no host route rewrite)
 
-`mtproto` runs `mtproto-proxy` (multi-secret) or `mtg` (single secret) as a sidecar. Install one of those binaries on PATH.
+`mtproto` is retired: the panel no longer creates such nodes and the agent refuses their config.
 
-WireGuard and MTProto secrets stay derived from the panel user uuid so the user list remains `{id, uuid, speed_limit, device_limit}`.
+WireGuard keys stay derived from the panel user uuid so the user list remains `{id, uuid, speed_limit, device_limit}`.

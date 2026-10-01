@@ -15,7 +15,6 @@ const (
 	wgClientSeed = "tjxt-wg-client:"
 	wgServerSeed = "tjxt-wg-server:"
 	wgAddrSeed   = "tjxt-wg-addr:"
-	mtprotoSeed  = "tjxt-mtproto:"
 )
 
 func GenX25519Private(data []byte) []byte {
@@ -98,14 +97,4 @@ func WireGuardClientAddress(uuid string) string {
 		c = 1
 	}
 	return fmt.Sprintf("10.%d.%d.%d/32", a, b, c)
-}
-
-func MTProtoSecret(uuid, domain string) string {
-	sum := sha256.Sum256([]byte(mtprotoSeed + uuid))
-	key := hex.EncodeToString(sum[:16])
-	domain = strings.TrimSpace(domain)
-	if domain == "" {
-		return "dd" + key
-	}
-	return "ee" + key + hex.EncodeToString([]byte(domain))
 }

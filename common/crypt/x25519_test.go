@@ -20,14 +20,3 @@ func TestWireGuardKeysAreDeterministic(t *testing.T) {
 		t.Fatal("server key from host:port must be stable")
 	}
 }
-
-func TestMTProtoSecretIncludesDomain(t *testing.T) {
-	plain := MTProtoSecret("uuid-1", "")
-	if len(plain) != 34 || plain[:2] != "dd" {
-		t.Fatalf("plain secret %s", plain)
-	}
-	fakeTLS := MTProtoSecret("uuid-1", "t.me")
-	if fakeTLS[:2] != "ee" {
-		t.Fatalf("faketls secret %s", fakeTLS)
-	}
-}
