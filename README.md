@@ -92,7 +92,7 @@ Push a `v*` tag. `.github/workflows/release.yml` runs vet and race tests, builds
 GOEXPERIMENT=jsonv2 go build -o build/tjxt-node .
 ```
 
-Requires Go 1.27. Xray comes from [wyx2685/xray-core](https://github.com/wyx2685/xray-core) (upstream v26.9.30 plus anytls/tuic), pinned by commit in the `replace` directive of `go.mod`.
+Requires Go 1.27. Xray comes from [youtonghy/xray-core](https://github.com/youtonghy/Xray-core), a fork of [wyx2685/xray-core](https://github.com/wyx2685/xray-core) (anytls/tuic/hysteria2) merged with upstream v26.10.21, pinned by commit in the `replace` directive of `go.mod`. Its REALITY adapter keeps the API of the pinned REALITY library so sing-box and mihomo clients can connect.
 
 This tree is derived from [v2node](https://github.com/wyx2685/v2node) (MPL-2.0): embedded Xray, stream transport, and a custom dispatcher interlayer for limits and traffic.
 
