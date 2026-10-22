@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -138,6 +139,13 @@ func runPair(ctx context.Context, o pairOptions, out io.Writer) error {
 		fmt.Fprintf(out, ", name %q", name)
 	}
 	fmt.Fprintln(out, ")")
+	if info.Common != nil && info.Common.ServerPort > 0 {
+		if info.Common.Host != "" {
+			fmt.Fprintf(out, "Node address %s\n", net.JoinHostPort(info.Common.Host, strconv.Itoa(info.Common.ServerPort)))
+		} else {
+			fmt.Fprintf(out, "Node port %d\n", info.Common.ServerPort)
+		}
+	}
 	nc.NodeID = info.Id
 	if o.DryRun {
 		fmt.Fprintf(out, "Dry run: %s not written\n", o.ConfigPath)

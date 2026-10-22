@@ -65,7 +65,7 @@ func TestPairWritesConfigWithLearnedNodeID(t *testing.T) {
 	if strings.Contains(out.String(), testKey) {
 		t.Fatalf("output leaks the key: %s", out.String())
 	}
-	if !strings.Contains(out.String(), "node 42") || !strings.Contains(out.String(), "vless") || !strings.Contains(out.String(), "HK-1") {
+	if !strings.Contains(out.String(), "node 42") || !strings.Contains(out.String(), "vless") || !strings.Contains(out.String(), "HK-1") || !strings.Contains(out.String(), "Node port 443") {
 		t.Fatalf("output lacks the node: %s", out.String())
 	}
 	if strings.Contains((*queries)[0], "node_id") {
