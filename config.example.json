@@ -7,9 +7,9 @@
   "Nodes": [
     {
       "ApiHost": "http://127.0.0.1:3000",
-      "NodeID": 1,
-      "ApiKey": "demo-node-key",
-      "Protocol": "auto"
+      "ApiKey": "this-node-own-key",
+      "Protocol": "auto",
+      "Timeout": 15
     }
   ]
 }

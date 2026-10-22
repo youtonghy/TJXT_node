@@ -12,6 +12,9 @@ Set `Protocol` to `auto` (default), `v3ui`, or `v1`.
 
 Authenticate with `X-Server-Token: <per-node server_key>` only; the key is never put in URLs or bodies. Do not use a user or admin session token.
 
+- **Pairing by key.** A node without `NodeID` sends no `node_id`/`server_id`; the panel finds the node from its own key and reports it as `base_config.node_id` (the top-level `id` is not trusted). That id is used for tags, certificate file names and logs; requests keep identifying the node by its key. If the answer has no `base_config.node_id`, the key is the fleet-wide server token and the node fails with "this key is not a node pairing key". A configured `NodeID` is still sent, and a different `base_config.node_id` is an error.
+- A rejected key is HTTP 401/403 or any answer whose body has `"error_code": "node_unauthorized"` (the panel uses 400). It is logged as a possibly rotated key and retried; traffic batches are kept, not dropped.
+
 - Traffic is pushed in batches with a stable `batch_id` (v1 also sends `X-Traffic-Batch-Id`). A batch is resent unchanged until the panel accepts it, and only then subtracted from the counters, so failed pushes and reloads do not lose traffic.
 - An empty user list is valid: the inbound stays down and comes up when users appear. A 304 means unchanged.
 - Private, loopback, link-local and metadata destinations are blocked unless the panel sets `base_config.allow_private_egress: true` for the node.
@@ -25,22 +28,43 @@ Authenticate with `X-Server-Token: <per-node server_key>` only; the key is never
   "Nodes": [
     {
       "ApiHost": "http://127.0.0.1:3000",
-      "NodeID": 1,
-      "ApiKey": "per-node-server-key",
-      "Protocol": "auto"
+      "ApiKey": "this-node-own-key",
+      "Protocol": "auto",
+      "Timeout": 15
     }
   ]
 }
 ```
 
+`ApiHost` and `ApiKey` are required. `NodeID` is optional: leave it out (or 0) to pair by key, which needs the node's own key from the panel's node list. Old configs with `NodeID` (including ones using the global server token) work unchanged.
+
+Environment variables, e.g. for Docker: when `TJXT_API_HOST` and `TJXT_API_KEY` are both set they **replace** the file's `Nodes` with that one node (`TJXT_NODE_ID` optional, timeout 15 s, protocol `auto`). The file's other settings (`Log`, `PprofPort`) still apply, and the file may be missing. Setting only one of the two, or `TJXT_NODE_ID` alone, is an error.
+
+### Pairing
+
+```bash
+TJXT_API_KEY='this-node-own-key' tjxt-node pair --api-host https://panel.example.com
+```
+
+`pair` fetches the node config with the key, prints the node id, type and name, and writes `-c` (default `/etc/tjxt-node/config.json`) with that single node and its `NodeID`. An existing config keeps its other settings (`Log`, `PprofPort`, ...) and its `Nodes` are replaced; a config with several nodes, or one that does not parse, is only replaced with `--force`. The file is written atomically with mode 0600 (directory 0750). Other flags: `--key` (default `$TJXT_API_KEY`; the environment keeps the key out of the process list), `--protocol auto|v3ui|v1`, `--timeout 15`, `--node-id N` (check a legacy key against a known id), `--dry-run` (check only, write nothing). The key is never printed.
+
+Exit codes: 0 paired, 1 other panel error, 2 invalid flags or URL, 3 panel unreachable, 4 key rejected, 5 global server token instead of a node key, 6 config not written.
+
+### Startup
+
+Only a config file that does not load or validate stops `tjxt-node server` (exit code 1). Each node's config is fetched concurrently; a node whose panel is unreachable or rejects its key is logged and retried with backoff from 1 s to 60 s while the other nodes run. When its config arrives the server reloads and starts it. If no node gets a config the process stays up and keeps retrying. On a reload, a running node whose panel cannot be reached keeps its last config.
+
 ## Deploy
 
-VPS 一键安装（systemd / OpenRC）：下载最新 Release 的二进制和 `deploy.sh`，按 `SHA256SUMS` 校验后安装，并写入 `/etc/tjxt-node/config.json`。面板后台节点列表的“安装命令”会生成同样的命令：
+VPS 一键安装（systemd / OpenRC）：下载最新 Release 的二进制和 `deploy.sh`，按 `SHA256SUMS` 校验后安装，并写入 `/etc/tjxt-node/config.json`。只需面板地址和该节点自己的密钥，节点 ID 由面板根据密钥识别。面板后台节点列表的“安装命令”会生成同样的命令：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh \
-  | sudo bash -s -- --api-host https://panel.example.com --node-id 1 --api-key 'your-server-key'
+  | sudo bash -s -- --api-host https://panel.example.com --api-key 'this-node-own-key'
 ```
+
+- 新装或 `--force-config` 时，脚本先用 `tjxt-node pair` 向面板校验地址和密钥，并把面板报告的节点 ID 写入配置；校验失败会打印原因，不写配置、不启动服务。已有配置保持不变。
+- `--node-id N` 仍可用（旧的全局密钥需要它），给出时会写入配置并与面板核对。
 
 - 仓库私有时匿名下载会失败：先 `export GITHUB_TOKEN=<有 repo 读权限的 token>`，脚本改走 GitHub API；脚本本身可用 `curl -H "Authorization: Bearer $GITHUB_TOKEN" …` 获取。
 - `--version vX.Y.Z` 安装指定版本；`TJXT_RELEASE_BASE_URL` 可指向提供相同文件名的镜像。

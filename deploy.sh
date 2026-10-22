@@ -51,9 +51,9 @@ usage() {
 TJXT_node 一键部署（TONG-ladder 节点）
 
 用法:
-  sudo ./deploy.sh --api-host https://panel.example.com --node-id 1 --api-key KEY
+  sudo ./deploy.sh --api-host https://panel.example.com --api-key NODE_KEY
   curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh \
-    | sudo bash -s -- --api-host URL --node-id 1 --api-key KEY
+    | sudo bash -s -- --api-host URL --api-key NODE_KEY
 
 子命令:
   install      安装或更新（默认）
@@ -65,8 +65,8 @@ TJXT_node 一键部署（TONG-ladder 节点）
 
 选项:
   --api-host URL            面板地址，例如 https://panel.example.com
-  --node-id N               面板节点 ID
-  --api-key KEY             节点 server_key（X-Server-Token）
+  --api-key KEY             节点自己的密钥（X-Server-Token），面板据此识别节点
+  --node-id N               可选：面板节点 ID（旧的全局密钥需要它；给出时写入配置并校验）
   --protocol auto|v3ui|v1   对接协议，默认 auto
   --version TAG             Release 版本，默认 latest
   --build                   从源码编译，而不是下载 Release 二进制
@@ -75,7 +75,7 @@ TJXT_node 一键部署（TONG-ladder 节点）
   --source DIR              使用已有源码目录编译
   --prefix DIR              安装目录，默认 /usr/local/tjxt-node
   --config-dir DIR          配置目录，默认 /etc/tjxt-node
-  --force-config            覆盖已有配置
+  --force-config            覆盖已有配置（新配置先经 tjxt-node pair 校验）
   --no-start                安装后不启动服务
   --yes                     卸载时跳过确认
   --purge                   卸载时同时删除配置和日志
@@ -330,7 +330,8 @@ has_openrc() {
 }
 
 prompt_install_fields() {
-  if [[ -n "$API_HOST" && -n "$NODE_ID" && -n "$API_KEY" ]]; then
+  if [[ -n "$API_HOST" && -n "$API_KEY" ]]; then
+    validate_node_id
     return
   fi
   local cfg
@@ -339,26 +340,28 @@ prompt_install_fields() {
     log "已有配置 $cfg，跳过填写（需要覆盖请加 --force-config）"
     return
   fi
-  is_tty || die "缺少 --api-host --node-id --api-key。非交互安装必须提供这三项。"
+  is_tty || die "缺少 --api-host --api-key。非交互安装必须提供这两项。"
   printf "${cyan}对接 TONG-ladder 面板${plain}\n"
   if [[ -z "$API_HOST" ]]; then
     read -r -p "面板地址 ApiHost: " API_HOST
   fi
-  if [[ -z "$NODE_ID" ]]; then
-    read -r -p "节点 ID NodeID: " NODE_ID
-  fi
   if [[ -z "$API_KEY" ]]; then
-    read -r -p "节点密钥 ApiKey (server_key): " API_KEY
+    read -r -s -p "节点密钥 ApiKey（面板节点列表中该节点的密钥）: " API_KEY
+    printf '\n'
   fi
-  if [[ "$PROTOCOL" == "$DEFAULT_PROTOCOL" ]]; then
-    local proto
-    read -r -p "协议 Protocol [auto]: " proto
-    PROTOCOL="${proto:-$DEFAULT_PROTOCOL}"
-  fi
-  [[ -n "$API_HOST" && -n "$NODE_ID" && -n "$API_KEY" ]] || die "ApiHost / NodeID / ApiKey 不能为空"
-  [[ "$NODE_ID" =~ ^[0-9]+$ ]] || die "NodeID 必须是数字"
+  [[ -n "$API_HOST" && -n "$API_KEY" ]] || die "ApiHost / ApiKey 不能为空"
+  validate_node_id
 }
 
+validate_node_id() {
+  [[ -z "$NODE_ID" || "$NODE_ID" =~ ^[0-9]+$ ]] || die "NodeID 必须是数字"
+}
+
+# write_config writes the config for a fresh install or --force-config. The
+# new config goes to a temporary file that tjxt-node pair verifies against the
+# panel (and fills with the node id the key belongs to); only then does it
+# replace the real config, so a wrong host or key leaves the old one and the
+# service untouched. An existing config is kept as is.
 write_config() {
   local cfg dest_dir
   cfg="$(config_path)"
@@ -368,15 +371,17 @@ write_config() {
     log "保留已有配置 $cfg"
     return
   fi
-  [[ -n "$API_HOST" && -n "$NODE_ID" && -n "$API_KEY" ]] || die "写配置需要 --api-host --node-id --api-key"
-  [[ "$NODE_ID" =~ ^[0-9]+$ ]] || die "NodeID 必须是数字"
-  local host key proto logf
+  [[ -n "$API_HOST" && -n "$API_KEY" ]] || die "写配置需要 --api-host --api-key"
+  validate_node_id
+  local host key proto logf node_id_line="" tmp
   host="$(json_escape "$API_HOST")"
   key="$(json_escape "$API_KEY")"
   proto="$(json_escape "$PROTOCOL")"
   logf="$(json_escape "$(log_path)")"
+  [[ -n "$NODE_ID" ]] && node_id_line="\"NodeID\": ${NODE_ID},"
+  tmp="${cfg}.pairing"
   umask 077
-  cat >"$cfg" <<EOF
+  cat >"$tmp" <<EOF
 {
   "Log": {
     "Level": "info",
@@ -386,7 +391,7 @@ write_config() {
   "Nodes": [
     {
       "ApiHost": "${host}",
-      "NodeID": ${NODE_ID},
+      ${node_id_line}
       "ApiKey": "${key}",
       "Protocol": "${proto}",
       "Timeout": 15
@@ -394,8 +399,29 @@ write_config() {
   ]
 }
 EOF
-  chmod 600 "$cfg"
+  chmod 600 "$tmp"
+  if ! pair_config "$tmp"; then
+    rm -f "$tmp"
+    die "面板校验失败（原因见上），未写入配置，服务未启动"
+  fi
+  mv -f "$tmp" "$cfg"
   log "写入配置 $cfg"
+}
+
+# pair_config FILE checks host and key with the panel and rewrites FILE's node
+# with the node id the panel reports, keeping its Log settings. The key goes
+# through the environment so it does not appear in the process list.
+pair_config() {
+  local file=$1 bin
+  bin="$(binary_path)"
+  if [[ ! -x "$bin" ]]; then
+    err "找不到 ${bin}，无法向面板校验"
+    return 1
+  fi
+  local -a args=(pair --api-host "$API_HOST" --protocol "$PROTOCOL" -c "$file")
+  [[ -n "$NODE_ID" ]] && args+=(--node-id "$NODE_ID")
+  log "向面板校验节点密钥"
+  TJXT_API_KEY="$API_KEY" "$bin" "${args[@]}"
 }
 
 # Source builds are used with --build/--source or when deploy.sh runs from a
@@ -747,7 +773,7 @@ cmd_local() {
     cd "$SRC"
     go build -trimpath -ldflags "-s -w" -o "build/${APP_NAME}" .
   )
-  if [[ -n "$API_HOST" && -n "$NODE_ID" && -n "$API_KEY" ]]; then
+  if [[ -n "$API_HOST" && -n "$API_KEY" ]]; then
     PREFIX="$SRC/build"
     CONFIG_DIR="$SRC/build"
     LOG_FILE="$SRC/build/node.log"
