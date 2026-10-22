@@ -40,6 +40,8 @@ NO_START=0
 YES=0
 PURGE=0
 SRC=""
+PROMPTED=0
+PAIR_INFO=""
 
 log()  { printf "${green}[+]${plain} %s\n" "$*"; }
 warn() { printf "${yellow}[!]${plain} %s\n" "$*" >&2; }
@@ -51,9 +53,16 @@ usage() {
 TJXT_node 一键部署（TONG-ladder 节点）
 
 用法:
+  交互安装（依次询问面板地址和节点密钥）:
+  curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh | sudo bash
+
+  非交互安装:
   sudo ./deploy.sh --api-host https://panel.example.com --api-key NODE_KEY
   curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh \
     | sudo bash -s -- --api-host URL --api-key NODE_KEY
+
+面板地址可以只写域名，或直接粘贴后台页面地址；脚本会补全 https://、去掉页面路径，
+并向面板校验后使用可用的地址。
 
 子命令:
   install      安装或更新（默认）
@@ -91,6 +100,30 @@ EOF
 }
 
 is_tty() { [[ -t 0 && -t 1 ]]; }
+
+# can_prompt is true when a terminal can answer questions, also under
+# curl ... | sudo bash where stdin is the script itself.
+can_prompt() { { : </dev/tty; } 2>/dev/null; }
+
+# ask VAR PROMPT [-s] reads one line from the terminal into VAR; -s hides it.
+# End of input (Ctrl-D) cancels instead of repeating the question forever.
+ask() {
+  local __ans="" __rc=0
+  if [[ "${3:-}" == "-s" ]]; then
+    IFS= read -r -s -p "$2" __ans </dev/tty || __rc=$?
+    printf '\n' >&2
+  else
+    IFS= read -r -p "$2" __ans </dev/tty || __rc=$?
+  fi
+  ((__rc == 0)) || [[ -n "$__ans" ]] || die "输入已结束，已取消"
+  printf -v "$1" '%s' "$__ans"
+}
+
+# mask_key keeps at most the last four characters of a key, like tjxt-node pair.
+mask_key() {
+  local k=$1
+  if ((${#k} < 12)); then printf '****'; else printf '****%s' "${k: -4}"; fi
+}
 
 need_root() {
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "请使用 root 运行（sudo $0 $*）"
@@ -329,28 +362,207 @@ has_openrc() {
   command -v rc-update >/dev/null 2>&1 && [[ -d /etc/init.d ]]
 }
 
+# normalize_api_host turns what a user pastes (panel.example.com,
+# https://panel.example.com/#/admin, https://panel.example.com/api/v1/...) into
+# the http(s)://host[:port][/path] form tjxt-node expects: whitespace, quotes,
+# query, fragment, API paths and trailing slashes are dropped and https:// is
+# added when no scheme is given. It fails on other schemes or a bad host.
+normalize_api_host() {
+  local s=$1 scheme rest hostport path=""
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  s="${s#[\"\']}"; s="${s%[\"\']}"
+  s="${s%%#*}"; s="${s%%\?*}"
+  [[ "$s" =~ [[:space:]] ]] && return 1
+  if [[ "$s" =~ ^([A-Za-z][A-Za-z0-9+.-]*)://(.*)$ ]]; then
+    scheme="$(tr '[:upper:]' '[:lower:]' <<<"${BASH_REMATCH[1]}")"
+    rest=${BASH_REMATCH[2]}
+  else
+    scheme=https
+    rest=$s
+  fi
+  [[ "$scheme" == http || "$scheme" == https ]] || return 1
+  hostport=${rest%%/*}
+  [[ "$rest" == */* ]] && path="/${rest#*/}"
+  [[ "$hostport" =~ ^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?$ ]] || return 1
+  hostport="$(tr '[:upper:]' '[:lower:]' <<<"$hostport")"
+  [[ "$path" == /api || "$path" == /api/* ]] && path=""
+  path="${path%%/api/*}"
+  while [[ "$path" == */ ]]; do path=${path%/}; done
+  printf '%s://%s%s' "$scheme" "$hostport" "$path"
+}
+
+# api_host_candidates prints the addresses to try, best first: the normalized
+# address, the same without its path (a pasted admin page), and over http when
+# the user gave no scheme.
+api_host_candidates() {
+  local raw=$1 first origin c
+  first="$(normalize_api_host "$raw")" || return 1
+  origin="$(sed -E 's#^(https?://[^/]+).*#\1#' <<<"$first")"
+  local -a list=("$first")
+  [[ "$origin" != "$first" ]] && list+=("$origin")
+  if [[ ! "${raw//[[:space:]]/}" =~ ^[\"\']?[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+    for c in "${list[@]}"; do list+=("http://${c#https://}"); done
+  fi
+  printf '%s\n' "${list[@]}"
+}
+
+# ask_api_host asks until the answer looks like a panel address.
+ask_api_host() {
+  local ans prev=$API_HOST
+  while true; do
+    if [[ -n "$prev" ]]; then
+      ask ans "面板地址（回车沿用 ${prev}）: "
+      [[ -z "$ans" ]] && ans=$prev
+    else
+      ask ans "面板地址（例如 panel.example.com 或 https://panel.example.com）: "
+    fi
+    if [[ -z "${ans//[[:space:]]/}" ]]; then
+      warn "面板地址不能为空"
+    elif normalize_api_host "$ans" >/dev/null; then
+      API_HOST=$ans
+      return
+    else
+      warn "无法识别的面板地址: ${ans}（只支持 http/https 域名或 IP）"
+    fi
+  done
+}
+
+ask_api_key() {
+  local ans
+  while true; do
+    ask ans "节点密钥（面板节点列表中该节点的密钥，输入不显示）: " -s
+    ans="${ans//[[:space:]]/}"
+    if [[ -n "$ans" ]]; then
+      API_KEY=$ans
+      return
+    fi
+    warn "节点密钥不能为空"
+  done
+}
+
+# prompt_install_fields asks for what the command line did not give. Under
+# curl | bash it reads from the terminal.
 prompt_install_fields() {
+  validate_node_id
   if [[ -n "$API_HOST" && -n "$API_KEY" ]]; then
-    validate_node_id
     return
   fi
-  local cfg
+  local cfg ans
   cfg="$(config_path)"
   if [[ -f "$cfg" && "$FORCE_CONFIG" -eq 0 ]]; then
-    log "已有配置 $cfg，跳过填写（需要覆盖请加 --force-config）"
-    return
+    if ! can_prompt; then
+      log "已有配置 $cfg，跳过填写（需要覆盖请加 --force-config）"
+      return
+    fi
+    ask ans "检测到已有配置 ${cfg}，是否重新填写面板地址和密钥？[y/N] "
+    if [[ ! "$ans" =~ ^[Yy] ]]; then
+      log "保留已有配置"
+      return
+    fi
+    FORCE_CONFIG=1
   fi
-  is_tty || die "缺少 --api-host --api-key。非交互安装必须提供这两项。"
+  can_prompt || die "缺少 --api-host --api-key。非交互安装必须提供这两项。"
+  PROMPTED=1
   printf "${cyan}对接 TONG-ladder 面板${plain}\n"
-  if [[ -z "$API_HOST" ]]; then
-    read -r -p "面板地址 ApiHost: " API_HOST
+  [[ -z "$API_HOST" ]] && ask_api_host
+  [[ -z "$API_KEY" ]] && ask_api_key
+  return 0
+}
+
+needs_config() { [[ ! -f "$(config_path)" || "$FORCE_CONFIG" -eq 1 ]]; }
+
+# verify_panel checks API_HOST and API_KEY with tjxt-node pair --dry-run,
+# trying each candidate address. On success API_HOST becomes the address that
+# worked and PAIR_INFO holds pair's report. Returns pair's exit code.
+verify_panel() {
+  local bin cand out rc=2
+  bin="$(binary_path)"
+  if [[ ! -x "$bin" ]]; then
+    err "找不到 ${bin}，无法向面板校验"
+    return 1
   fi
-  if [[ -z "$API_KEY" ]]; then
-    read -r -s -p "节点密钥 ApiKey（面板节点列表中该节点的密钥）: " API_KEY
-    printf '\n'
+  local -a cands=()
+  while IFS= read -r cand; do
+    cands+=("$cand")
+  done < <(api_host_candidates "$API_HOST" || true)
+  if ((${#cands[@]} == 0)); then
+    err "面板地址格式不正确: ${API_HOST}（示例: https://panel.example.com）"
+    return 2
   fi
-  [[ -n "$API_HOST" && -n "$API_KEY" ]] || die "ApiHost / ApiKey 不能为空"
-  validate_node_id
+  for cand in "${cands[@]}"; do
+    log "向面板校验: ${cand}"
+    local -a args=(pair --dry-run --api-host "$cand" --protocol "$PROTOCOL")
+    [[ -n "$NODE_ID" ]] && args+=(--node-id "$NODE_ID")
+    rc=0
+    out="$(TJXT_API_KEY="$API_KEY" "$bin" "${args[@]}" 2>&1)" || rc=$?
+    if ((rc == 0)); then
+      API_HOST=$cand
+      PAIR_INFO=$out
+      return 0
+    fi
+    warn "$(grep '^tjxt-node:' <<<"$out" || printf '%s' "$out")"
+    # The panel answered, so the address is right and only the key is wrong.
+    if [[ "$rc" -eq 4 || "$rc" -eq 5 ]]; then
+      API_HOST=$cand
+      break
+    fi
+  done
+  case "$rc" in
+    3) err "无法连接面板，请检查地址、端口、DNS 和本机网络" ;;
+    4) err "面板拒绝了密钥：请在面板节点列表中复制该节点的密钥（可能已重置）" ;;
+    5) err "这是全局通讯密钥，不是节点自己的密钥；请改用面板节点列表中该节点的密钥" ;;
+    *) err "面板校验失败：请确认地址是面板地址（不是订阅或节点地址）" ;;
+  esac
+  return "$rc"
+}
+
+# show_pair_info prints what the panel reported for the key.
+show_pair_info() {
+  local id type name addr
+  id="$(sed -nE 's/^Key belongs to node ([0-9]+).*/\1/p' <<<"$PAIR_INFO")"
+  type="$(sed -nE 's/^Key belongs to node [0-9]+ \(type ([^,)]*).*/\1/p' <<<"$PAIR_INFO")"
+  name="$(sed -nE 's/^Key belongs to node .*, name "(.*)"\)$/\1/p' <<<"$PAIR_INFO")"
+  addr="$(sed -nE 's/^Node (address|port) (.*)$/\2/p' <<<"$PAIR_INFO")"
+  printf "\n${green}面板校验通过，获取到的节点信息:${plain}\n"
+  printf '  面板地址: %s\n' "$API_HOST"
+  printf '  节点密钥: %s\n' "$(mask_key "$API_KEY")"
+  if [[ -n "$id" ]]; then
+    printf '  节点 ID:  %s\n' "$id"
+    printf '  节点类型: %s\n' "${type:-未知}"
+    [[ -n "$name" ]] && printf '  节点名称: %s\n' "$name"
+    [[ -n "$addr" ]] && printf '  节点地址: %s\n' "$addr"
+  else
+    printf '%s\n' "$PAIR_INFO" | sed 's/^/  /'
+  fi
+  printf '  对接协议: %s\n\n' "$PROTOCOL"
+}
+
+# confirm_panel verifies host and key before the config is written. When the
+# values were typed in, a failure asks again and the user confirms the node.
+confirm_panel() {
+  needs_config || return 0
+  [[ -n "$API_HOST" && -n "$API_KEY" ]] || die "写配置需要 --api-host --api-key"
+  local rc ans
+  while true; do
+    rc=0
+    verify_panel || rc=$?
+    if ((rc == 0)); then
+      show_pair_info
+      ((PROMPTED)) || return 0
+      ask ans "确认使用该节点并完成安装？[Y/n] "
+      [[ "$ans" =~ ^[Nn] ]] || return 0
+    elif ((!PROMPTED)); then
+      die "面板校验失败（原因见上），未写入配置，服务未启动"
+    fi
+    ask ans "重新填写面板地址和密钥？[Y/n] "
+    [[ "$ans" =~ ^[Nn] ]] && die "已取消，未写入配置，服务未启动"
+    ask_api_host
+    case "$rc" in
+      3) ;; # unreachable: the key was never checked
+      *) ask_api_key ;;
+    esac
+  done
 }
 
 validate_node_id() {
@@ -420,8 +632,8 @@ pair_config() {
   fi
   local -a args=(pair --api-host "$API_HOST" --protocol "$PROTOCOL" -c "$file")
   [[ -n "$NODE_ID" ]] && args+=(--node-id "$NODE_ID")
-  log "向面板校验节点密钥"
-  TJXT_API_KEY="$API_KEY" "$bin" "${args[@]}"
+  log "写入节点配置"
+  TJXT_API_KEY="$API_KEY" "$bin" "${args[@]}" >/dev/null
 }
 
 # Source builds are used with --build/--source or when deploy.sh runs from a
@@ -664,8 +876,9 @@ cmd_log() {
 
 cmd_uninstall() {
   if [[ "$YES" -ne 1 ]]; then
-    is_tty || die "卸载请加 --yes"
-    read -r -p "确认卸载 ${APP_NAME}? [y/N] " ans
+    can_prompt || die "卸载请加 --yes"
+    local ans
+    ask ans "确认卸载 ${APP_NAME}? [y/N] "
     [[ "$ans" =~ ^[Yy]$ ]] || { log "已取消"; exit 0; }
   fi
   if has_systemd && systemctl list-unit-files "${SERVICE_NAME}.service" >/dev/null 2>&1; then
@@ -707,6 +920,25 @@ install_service() {
   fi
 }
 
+# service_state prints whether the service starts at boot and is running.
+service_state() {
+  local enabled="未开启" active="未运行"
+  if has_systemd; then
+    systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null && enabled="已开启"
+    systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null && active="运行中"
+  elif has_openrc; then
+    rc-update show default 2>/dev/null | grep -qw "${SERVICE_NAME}" && enabled="已开启"
+    rc-service "$SERVICE_NAME" status >/dev/null 2>&1 && active="运行中"
+  else
+    enabled="未安装服务"
+  fi
+  [[ "$NO_START" -eq 1 && "$active" != "运行中" ]] && active="未启动（--no-start）"
+  printf '  开机自启: %s\n' "$enabled"
+  printf '  运行状态: %s\n' "$active"
+  [[ "$active" == "未运行" ]] && printf '  服务未在运行，请查看日志: tjxt-node-deploy log\n'
+  return 0
+}
+
 cmd_install() {
   need_root
   if wants_source_build; then
@@ -720,15 +952,21 @@ cmd_install() {
     prompt_install_fields
     download_release
   fi
+  confirm_panel
   write_config
   install_ctl_wrapper
   install_service
+  # Give a failing start a moment to show up in the state below.
+  if [[ "$NO_START" -eq 0 ]] && { has_systemd || has_openrc; }; then
+    sleep 3
+  fi
   printf '\n'
   log "部署完成"
-  printf '  二进制: %s\n' "$(binary_path)"
-  printf '  配置:   %s\n' "$(config_path)"
-  printf '  日志:   %s\n' "$(log_path)"
-  printf '  管理:   tjxt-node-deploy status|log|restart|update\n'
+  printf '  二进制:   %s\n' "$(binary_path)"
+  printf '  配置:     %s\n' "$(config_path)"
+  printf '  日志:     %s\n' "$(log_path)"
+  service_state
+  printf '  管理:     tjxt-node-deploy status|log|restart|update\n'
   printf '  节点端口由面板下发，请自行在防火墙放行。\n'
 }
 
@@ -787,7 +1025,7 @@ cmd_local() {
 
 show_menu() {
   while true; do
-    printf '\n%sTJXT_node 管理%s\n' "$cyan" "$plain"
+    printf "\n${cyan}TJXT_node 管理${plain}\n"
     printf '  1) 安装 / 更新\n'
     printf '  2) 启动\n'
     printf '  3) 停止\n'

@@ -46,7 +46,7 @@ Environment variables, e.g. for Docker: when `TJXT_API_HOST` and `TJXT_API_KEY` 
 TJXT_API_KEY='this-node-own-key' tjxt-node pair --api-host https://panel.example.com
 ```
 
-`pair` fetches the node config with the key, prints the node id, type and name, and writes `-c` (default `/etc/tjxt-node/config.json`) with that single node and its `NodeID`. An existing config keeps its other settings (`Log`, `PprofPort`, ...) and its `Nodes` are replaced; a config with several nodes, or one that does not parse, is only replaced with `--force`. The file is written atomically with mode 0600 (directory 0750). Other flags: `--key` (default `$TJXT_API_KEY`; the environment keeps the key out of the process list), `--protocol auto|v3ui|v1`, `--timeout 15`, `--node-id N` (check a legacy key against a known id), `--dry-run` (check only, write nothing). The key is never printed.
+`pair` fetches the node config with the key, prints the node id, type, name and address (`host:port`, or the port when the panel sets no host), and writes `-c` (default `/etc/tjxt-node/config.json`) with that single node and its `NodeID`. An existing config keeps its other settings (`Log`, `PprofPort`, ...) and its `Nodes` are replaced; a config with several nodes, or one that does not parse, is only replaced with `--force`. The file is written atomically with mode 0600 (directory 0750). Other flags: `--key` (default `$TJXT_API_KEY`; the environment keeps the key out of the process list), `--protocol auto|v3ui|v1`, `--timeout 15`, `--node-id N` (check a legacy key against a known id), `--dry-run` (check only, write nothing). The key is never printed.
 
 Exit codes: 0 paired, 1 other panel error, 2 invalid flags or URL, 3 panel unreachable, 4 key rejected, 5 global server token instead of a node key, 6 config not written.
 
@@ -56,7 +56,20 @@ Only a config file that does not load or validate stops `tjxt-node server` (exit
 
 ## Deploy
 
-VPS 一键安装（systemd / OpenRC）：下载最新 Release 的二进制和 `deploy.sh`，按 `SHA256SUMS` 校验后安装，并写入 `/etc/tjxt-node/config.json`。只需面板地址和该节点自己的密钥，节点 ID 由面板根据密钥识别。面板后台节点列表的“安装命令”会生成同样的命令：
+VPS 一键安装（systemd / OpenRC）：下载最新 Release 的二进制和 `deploy.sh`，按 `SHA256SUMS` 校验后安装，写入 `/etc/tjxt-node/config.json`，并把服务设为开机自启后启动。只需面板地址和该节点自己的密钥，节点 ID 由面板根据密钥识别。
+
+交互安装：不带参数运行，脚本依次询问面板地址和节点密钥（密钥输入不显示）。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh | sudo bash
+```
+
+- 面板地址可以只写域名（`panel.example.com`），也可以直接粘贴后台页面地址；脚本会去掉空白、引号、`?`/`#` 之后的部分、`/api/...` 和末尾的 `/`，没写协议时补 `https://`。校验时依次尝试该地址、去掉页面路径后的地址，以及（没写协议时）对应的 `http://` 地址，并使用第一个能通过校验的地址。
+- 校验通过后会显示面板返回的节点信息（面板地址、打码的密钥、节点 ID、类型、名称和地址），确认后才写配置并启动服务；校验失败会说明原因（连不上面板、密钥被拒、填了全局密钥）并允许重新填写。
+- 安装结束时会显示开机自启和运行状态。
+- 已有配置时会询问是否重新填写；否则保留原配置。
+
+非交互安装：面板后台节点列表的“安装命令”会生成这样的命令，校验后直接显示节点信息并完成安装：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh \
