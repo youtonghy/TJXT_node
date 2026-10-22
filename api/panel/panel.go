@@ -21,8 +21,9 @@ type Client struct {
 	client  *resty.Client
 	APIHost string
 	Token   string
-	NodeId  int
-	mode    protocolMode
+	// NodeId is the configured node id; 0 pairs by key (see learnedID).
+	NodeId int
+	mode   protocolMode
 
 	// mu guards the mutable protocol and cache state below; the node info
 	// monitor and the traffic report task use one client concurrently.
@@ -31,6 +32,21 @@ type Client struct {
 	nodeEtag         string
 	userEtag         string
 	responseBodyHash string
+	// learnedID is the panel's base_config.node_id seen when pairing by key.
+	// It is used for tags and logs only: requests keep identifying the node by
+	// its key, so a node moved to another id by the panel still works.
+	learnedID int
+}
+
+// EffectiveNodeID returns the configured node id, or the one the panel
+// reported for a node paired by key (0 before the first config).
+func (c *Client) EffectiveNodeID() int {
+	if c.NodeId > 0 {
+		return c.NodeId
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.learnedID
 }
 
 func (c *Client) getNodeEtag() string {
@@ -51,19 +67,29 @@ func (c *Client) setUserEtag(etag string) {
 	c.mu.Unlock()
 }
 
-// updateNodeCache records a fetched node config and reports whether its body
-// differs from the previous one.
-func (c *Client) updateNodeCache(etag string, body []byte) bool {
+func bodyHash(body []byte) string {
 	hash := sha256.Sum256(body)
-	newBodyHash := hex.EncodeToString(hash[:])
+	return hex.EncodeToString(hash[:])
+}
+
+// nodeConfigChanged reports whether a fetched node config differs from the
+// last accepted one.
+func (c *Client) nodeConfigChanged(body []byte) bool {
+	h := bodyHash(body)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.responseBodyHash == newBodyHash {
-		return false
-	}
-	c.responseBodyHash = newBodyHash
+	return c.responseBodyHash != h
+}
+
+// commitNodeCache records an accepted node config. Only configs that parsed
+// are recorded, so a rejected one is reported again on the next fetch instead
+// of reading as "unchanged".
+func (c *Client) commitNodeCache(etag string, body []byte) {
+	h := bodyHash(body)
+	c.mu.Lock()
+	c.responseBodyHash = h
 	c.nodeEtag = etag
-	return true
+	c.mu.Unlock()
 }
 
 func New(c *conf.NodeConfig) (*Client, error) {
@@ -88,11 +114,13 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	})
 	client.SetBaseURL(c.APIHost)
 	// The node key travels only in the X-Server-Token header, never in the URL
-	// where proxies and access logs would record it.
-	client.SetQueryParams(map[string]string{
-		"node_type": "v3ui",
-		"node_id":   strconv.Itoa(c.NodeID),
-	})
+	// where proxies and access logs would record it. Without a NodeID the panel
+	// identifies the node by its own key.
+	params := map[string]string{"node_type": "v3ui"}
+	if c.NodeID > 0 {
+		params["node_id"] = strconv.Itoa(c.NodeID)
+	}
+	client.SetQueryParams(params)
 	return &Client{
 		client:  client,
 		Token:   c.Key,

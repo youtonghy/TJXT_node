@@ -3,6 +3,7 @@ package panel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -94,7 +95,7 @@ func (c *Client) callV3(
 		return r, nil, errV3Unsupported
 	}
 	if r.StatusCode() >= 400 {
-		return r, nil, &StatusError{Action: "v3 gateway", Code: r.StatusCode(), Status: r.Status(), Body: truncateBody(r.Body())}
+		return r, nil, newStatusError("v3 gateway", r)
 	}
 	var env gatewayEnvelope
 	if err := json.Unmarshal(r.Body(), &env); err != nil {
@@ -125,16 +126,54 @@ type StatusError struct {
 	Code   int
 	Status string
 	Body   string
+	// ErrorCode is the body's "error_code", e.g. "node_unauthorized".
+	ErrorCode string
+}
+
+// errorCodeNodeUnauthorized is the panel's answer (HTTP 400, V2Board style) to
+// a node key it does not accept.
+const errorCodeNodeUnauthorized = "node_unauthorized"
+
+func newStatusError(action string, r *resty.Response) *StatusError {
+	var body struct {
+		ErrorCode string `json:"error_code"`
+	}
+	// Not every error body is JSON; the code is optional.
+	_ = json.Unmarshal(r.Body(), &body)
+	return &StatusError{
+		Action:    action,
+		Code:      r.StatusCode(),
+		Status:    r.Status(),
+		Body:      truncateBody(r.Body()),
+		ErrorCode: body.ErrorCode,
+	}
 }
 
 func (e *StatusError) Error() string {
 	return fmt.Sprintf("%s: %s: %s", e.Action, e.Status, e.Body)
 }
 
+// Unauthorized reports whether the panel rejected the node key: HTTP 401/403,
+// or any status whose body carries "error_code": "node_unauthorized".
+func (e *StatusError) Unauthorized() bool {
+	return e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden ||
+		e.ErrorCode == errorCodeNodeUnauthorized
+}
+
+// IsUnauthorized reports whether err is the panel rejecting the node key.
+func IsUnauthorized(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Unauthorized()
+}
+
 // Permanent reports whether resending the same request cannot succeed: the panel
 // rejected its content. Auth failures, missing endpoints, timeouts and rate
 // limits are retryable.
 func (e *StatusError) Permanent() bool {
+	if e.Unauthorized() {
+		// A rotated key is fixed by the operator; the request itself is fine.
+		return false
+	}
 	switch e.Code {
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
 		http.StatusRequestTimeout, http.StatusTooManyRequests:
@@ -152,10 +191,13 @@ func truncateBody(body []byte) string {
 
 // identityParams identifies the node to the v3 gateway. The token is not part
 // of it: the gateway forwards the X-Server-Token header to the node routes.
+// Without a configured NodeID the node is paired by key: the panel finds the
+// node from its own key, so no id is sent.
 func identityParams(c *Client) map[string]any {
-	return map[string]any{
-		"node_id":   c.NodeId,
-		"server_id": c.NodeId,
-		"node_type": "v3ui",
+	p := map[string]any{"node_type": "v3ui"}
+	if c.NodeId > 0 {
+		p["node_id"] = c.NodeId
+		p["server_id"] = c.NodeId
 	}
+	return p
 }

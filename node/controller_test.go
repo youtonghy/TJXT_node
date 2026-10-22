@@ -105,7 +105,7 @@ func TestBrokenNodeConfigDoesNotFailStart(t *testing.T) {
 func TestNewNodesDoNotSeeTheirOwnConfigAsChanged(t *testing.T) {
 	p := newFakePanel(t, "vless", testUsers(1))
 	retry := 0
-	n, err := New([]conf.NodeConfig{{APIHost: p.URL, NodeID: 1, Key: "k", Timeout: 5, RetryCount: &retry, Protocol: "v1"}})
+	n, err := New([]conf.NodeConfig{{APIHost: p.URL, NodeID: 1, Key: "k", Timeout: 5, RetryCount: &retry, Protocol: "v1"}}, nil)
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}

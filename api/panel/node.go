@@ -78,7 +78,10 @@ type BaseConfig struct {
 	PushInterval           any `json:"push_interval"`
 	PullInterval           any `json:"pull_interval"`
 	DeviceOnlineMinTraffic int `json:"device_online_min_traffic"`
-	NodeReportMinTraffic   int `json:"node_report_min_traffic"`
+	// NodeID is sent only to a node authenticated with its own key; the
+	// fleet-wide token never gets it. The top-level "id" is not trusted.
+	NodeID               int `json:"node_id"`
+	NodeReportMinTraffic int `json:"node_report_min_traffic"`
 	// AllowPrivateEgress lets users reach private, loopback, link-local and
 	// metadata addresses through this node. Absent means false.
 	AllowPrivateEgress bool `json:"allow_private_egress"`
@@ -126,17 +129,13 @@ type EncSettings struct {
 }
 
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
-	var body []byte
 	if c.v3Available() {
 		r, data, err := c.callV3(ctx, "GET", "server/UniProxy/config", identityParams(c), c.getNodeEtag())
 		if err == nil {
 			if r.StatusCode() == 304 {
 				return nil, nil
 			}
-			if !c.updateNodeCache(r.Header().Get("ETag"), data) {
-				return nil, nil
-			}
-			return parseNodeInfo(c, data)
+			return c.acceptNodeConfig(r.Header().Get("ETag"), data)
 		}
 		if !errors.Is(err, errV3Unsupported) {
 			return nil, err
@@ -165,19 +164,62 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if err := checkResponse(r, nil, "get node config"); err != nil {
 		return nil, err
 	}
-	if !c.updateNodeCache(r.Header().Get("ETag"), r.Body()) {
+	return c.acceptNodeConfig(r.Header().Get("ETag"), r.Body())
+}
+
+// acceptNodeConfig parses a fetched node config; it returns nil when the config
+// is unchanged since the last accepted one.
+func (c *Client) acceptNodeConfig(etag string, body []byte) (*NodeInfo, error) {
+	if len(body) == 0 {
+		return nil, fmt.Errorf("panel returned an empty node config")
+	}
+	if !c.nodeConfigChanged(body) {
 		return nil, nil
 	}
-	body = r.Body()
-	return parseNodeInfo(c, body)
+	info, err := parseNodeInfo(c, body)
+	if err != nil {
+		return nil, err
+	}
+	c.commitNodeCache(etag, body)
+	return info, nil
+}
+
+// ErrNotPairingKey means a node without NodeID got a config without
+// base_config.node_id: the key is the fleet-wide server token, which cannot
+// tell the panel which node this is.
+var ErrNotPairingKey = errors.New("this key is not a node pairing key (use the node's own key, not the global server token)")
+
+// resolveNodeID checks the panel's base_config.node_id against the configured
+// NodeID and returns the node's id.
+func (c *Client) resolveNodeID(bc *BaseConfig) (int, error) {
+	reported := 0
+	if bc != nil {
+		reported = bc.NodeID
+	}
+	switch {
+	case c.NodeId > 0 && reported > 0 && reported != c.NodeId:
+		return 0, fmt.Errorf("panel says this key belongs to node %d but NodeID is %d; fix NodeID or ApiKey", reported, c.NodeId)
+	case c.NodeId > 0:
+		return c.NodeId, nil
+	case reported <= 0:
+		return 0, ErrNotPairingKey
+	}
+	c.mu.Lock()
+	c.learnedID = reported
+	c.mu.Unlock()
+	return reported, nil
 }
 
 func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
-	node := &NodeInfo{Id: c.NodeId}
 	cm := &CommonNode{}
 	if err := json.Unmarshal(body, cm); err != nil {
 		return nil, fmt.Errorf("decode node params error: %s", err)
 	}
+	id, err := c.resolveNodeID(cm.BaseConfig)
+	if err != nil {
+		return nil, err
+	}
+	node := &NodeInfo{Id: id}
 	if len(cm.NetworkSettings) == 0 && len(cm.StreamSettings) > 0 {
 		cm.NetworkSettings = cm.StreamSettings
 	}
@@ -201,10 +243,10 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 	cf := cm.TlsSettings.CertFile
 	kf := cm.TlsSettings.KeyFile
 	if cf == "" {
-		cf = filepath.Join("/etc/tjxt-node/", cm.Protocol+strconv.Itoa(c.NodeId)+".cer")
+		cf = filepath.Join("/etc/tjxt-node/", cm.Protocol+strconv.Itoa(node.Id)+".cer")
 	}
 	if kf == "" {
-		kf = filepath.Join("/etc/tjxt-node/", cm.Protocol+strconv.Itoa(c.NodeId)+".key")
+		kf = filepath.Join("/etc/tjxt-node/", cm.Protocol+strconv.Itoa(node.Id)+".key")
 	}
 	cm.CertInfo = &CertInfo{
 		CertMode:         cm.TlsSettings.CertMode,

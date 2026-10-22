@@ -27,6 +27,15 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	// delay to start nodeInfoMonitor
 	c.startTask(c.nodeInfoMonitorPeriodic, false)
 	log.WithField("tag", c.tag).Info("Start report node status")
+	// Report once right away so the panel sees the node's state without
+	// waiting a full push interval. It runs here rather than as the task's
+	// first tick so it cannot interleave with whatever the caller does next;
+	// with nothing to report it makes no request.
+	ctx, cancel := context.WithTimeout(context.Background(), finalFlushTimeout)
+	if err := c.reportUserTrafficTask(ctx); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Initial node status report failed, retrying on the next interval")
+	}
+	cancel()
 	c.startTask(c.userReportPeriodic, false)
 	if node.Security == panel.Tls {
 		switch c.info.Common.CertInfo.CertMode {
@@ -73,8 +82,9 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		} else {
 			log.WithField("tag", c.tag).Error("No reload channel, the new node info is ignored")
 		}
+	} else {
+		log.WithField("tag", c.tag).Debug("Node info no change")
 	}
-	log.WithField("tag", c.tag).Debug("Node info no change")
 
 	// get user info
 	newU, err := c.apiClient.GetUserList(ctx)

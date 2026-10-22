@@ -33,7 +33,7 @@ const (
 var serverCommand = cobra.Command{
 	Use:   "server",
 	Short: "Run the tjxt-node server",
-	Run:   serverHandle,
+	RunE:  serverHandle,
 	Args:  cobra.NoArgs,
 }
 
@@ -60,7 +60,7 @@ type prepared struct {
 	nodes *node.Node
 }
 
-func serverHandle(_ *cobra.Command, _ []string) {
+func serverHandle(_ *cobra.Command, _ []string) error {
 	showVersion()
 	log.SetFormatter(&log.TextFormatter{
 		DisableTimestamp: true,
@@ -69,47 +69,72 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	})
 	//init limiter
 	limiter.Init()
-	next, err := prepare(config)
+	// A config file that does not load is the only startup error that exits:
+	// an unreachable panel or a rejected key is retried below while the
+	// process stays up.
+	c, err := loadConfig(config)
 	if err != nil {
-		log.WithField("err", err).Error("Load config or node info failed")
-		return
+		return err
 	}
-	applyLogConfig(next.conf)
+	applyLogConfig(c)
 	// Enable pprof if configured
-	if next.conf.PprofPort != 0 {
+	if c.PprofPort != 0 {
 		go func() {
-			log.Infof("Starting pprof server on :%d", next.conf.PprofPort)
-			if err := http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", next.conf.PprofPort), nil); err != nil {
+			log.Infof("Starting pprof server on :%d", c.PprofPort)
+			if err := http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", c.PprofPort), nil); err != nil {
 				log.WithField("err", err).Error("pprof server failed")
 			}
 		}()
 	}
-	log.Info("Got nodes info from server")
 	var reloadCh = make(chan struct{}, 1)
-	current, err := next.start(reloadCh)
-	if err != nil {
-		log.WithField("err", err).Error("Run nodes failed")
-		return
+
+	// running is the configuration of current. retry re-attempts a start or
+	// reload that failed: while the old (or rolled-back) instance keeps
+	// serving, or while nothing runs (the first start or a rollback failed).
+	var (
+		current *instance
+		running *prepared
+		retry   <-chan time.Time
+	)
+	backoff := restartBackoffMin
+	scheduleRetry := func(err error) {
+		log.WithField("err", err).Errorf("重启失败, retrying in %s", backoff)
+		retry = time.After(backoff)
+		backoff = min(backoff*2, restartBackoffMax)
 	}
-	log.Info("Nodes started")
+	next, err := prepareConf(c, nil)
+	if err == nil {
+		current, err = next.start(reloadCh)
+	}
+	if err != nil {
+		log.WithField("err", err).Error("Start nodes failed, retrying")
+		scheduleRetry(err)
+	} else {
+		running = next
+		logStarted(next)
+	}
 	if watch {
-		// On file change, just signal reload; do not run reload concurrently here
-		w, err := conf.Watch(config, func() {
-			select {
-			case reloadCh <- struct{}{}:
-			default: // drop if a reload is already queued
+		if _, err := os.Stat(config); err != nil {
+			// Only the environment configures the node (e.g. Docker).
+			log.WithField("err", err).Info("Config file not readable, not watching it")
+		} else {
+			// On file change, just signal reload; do not run reload concurrently here
+			w, err := conf.Watch(config, func() {
+				select {
+				case reloadCh <- struct{}{}:
+				default: // drop if a reload is already queued
+				}
+			})
+			if err != nil {
+				current.close()
+				return fmt.Errorf("start watch: %w", err)
 			}
-		})
-		if err != nil {
-			log.WithField("err", err).Error("start watch failed")
-			current.close()
-			return
+			defer func() {
+				if err := w.Close(); err != nil {
+					log.WithField("err", err).Error("Close config watcher failed")
+				}
+			}()
 		}
-		defer func() {
-			if err := w.Close(); err != nil {
-				log.WithField("err", err).Error("Close config watcher failed")
-			}
-		}()
 	}
 	// clear memory
 	runtime.GC()
@@ -117,20 +142,13 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
 
-	// running is the configuration of current. retry re-attempts a reload that
-	// failed: while the old (or rolled-back) instance keeps serving, or while
-	// nothing runs after a rollback also failed.
-	running := next
-	var retry <-chan time.Time
-	backoff := restartBackoffMin
-	scheduleRetry := func(err error) {
-		log.WithField("err", err).Errorf("重启失败, retrying in %s", backoff)
-		retry = time.After(backoff)
-		backoff = min(backoff*2, restartBackoffMax)
-	}
 	attemptReload := func() {
 		retry = nil
-		next, err := prepare(config)
+		var prev *node.Node
+		if running != nil {
+			prev = running.nodes
+		}
+		next, err := prepare(config, prev)
 		if err != nil {
 			if current != nil {
 				log.Warn("new config rejected, keeping the running one")
@@ -143,6 +161,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		current = nil
 		if current, err = next.start(reloadCh); err == nil {
 			log.Info("重启成功")
+			logStarted(next)
 			running = next
 			backoff = restartBackoffMin
 			runtime.GC()
@@ -167,7 +186,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			log.Info("收到退出信号，正在关闭程序...")
 			// Closing the nodes flushes unreported traffic to the panel.
 			current.close()
-			return
+			return nil
 		case <-reloadCh:
 			if retry != nil {
 				// A failed reload is already scheduled with backoff; polls that keep
@@ -183,14 +202,30 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	}
 }
 
-// prepare loads, validates and resolves a configuration without touching the
-// running instance.
-func prepare(path string) (*prepared, error) {
+// loadConfig loads and validates the config file (and the environment node).
+func loadConfig(path string) (*conf.Conf, error) {
 	c := conf.New()
 	if err := c.LoadFromPath(path); err != nil {
+		return nil, fmt.Errorf("load config %s: %w", path, err)
+	}
+	return c, nil
+}
+
+// prepare loads, validates and resolves a configuration without touching the
+// running instance. prev is the running generation of nodes, if any.
+func prepare(path string, prev *node.Node) (*prepared, error) {
+	c, err := loadConfig(path)
+	if err != nil {
 		return nil, err
 	}
-	nodes, err := node.New(c.NodeConfigs)
+	return prepareConf(c, prev)
+}
+
+// prepareConf fetches the node configs and checks that the Xray config builds.
+// Nodes whose config cannot be fetched are left pending rather than failing
+// the whole configuration.
+func prepareConf(c *conf.Conf, prev *node.Node) (*prepared, error) {
+	nodes, err := node.New(c.NodeConfigs, prev)
 	if err != nil {
 		return nil, fmt.Errorf("get node info: %w", err)
 	}
@@ -198,6 +233,14 @@ func prepare(path string) (*prepared, error) {
 		return nil, fmt.Errorf("build xray config: %w", err)
 	}
 	return &prepared{conf: c, nodes: nodes}, nil
+}
+
+func logStarted(p *prepared) {
+	if pending := p.nodes.Pending(); pending > 0 {
+		log.Warnf("Started %d nodes, %d wait for their panel config and start once it arrives", len(p.nodes.Configs), pending)
+		return
+	}
+	log.Infof("Started %d nodes", len(p.nodes.Configs))
 }
 
 // start starts the core and the nodes; on failure everything started is
@@ -209,7 +252,7 @@ func (p *prepared) start(reloadCh chan struct{}) (*instance, error) {
 		return nil, fmt.Errorf("start core: %w", err)
 	}
 	inst := &instance{nodes: p.nodes, core: v2core}
-	if err := p.nodes.Start(p.conf.NodeConfigs, v2core); err != nil {
+	if err := p.nodes.Start(v2core); err != nil {
 		inst.close()
 		return nil, fmt.Errorf("start nodes: %w", err)
 	}
@@ -219,7 +262,7 @@ func (p *prepared) start(reloadCh chan struct{}) (*instance, error) {
 // restart starts the same configuration again with fresh controllers built
 // from the cached node info, without asking the panel.
 func (p *prepared) restart(reloadCh chan struct{}) (*instance, *prepared, error) {
-	nodes, err := node.FromInfos(p.conf.NodeConfigs, p.nodes.NodeInfos)
+	nodes, err := p.nodes.Rebuild()
 	if err != nil {
 		return nil, nil, err
 	}

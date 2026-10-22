@@ -33,6 +33,9 @@ type fakePanel struct {
 	userFetches int
 	notModified int
 	pushes      []pushRecord
+	// down makes every endpoint answer 503, like a panel being deployed.
+	down          bool
+	configFetches int
 }
 
 func newFakePanel(t *testing.T, protocol string, users []panel.UserInfo) *fakePanel {
@@ -56,10 +59,15 @@ func (p *fakePanel) serve(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
+	if p.down {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
 	switch r.URL.Path {
 	case "/api/v3/server":
 		w.WriteHeader(http.StatusNotFound)
 	case "/api/v2/server/config":
+		p.configFetches++
 		_ = json.NewEncoder(w).Encode(p.config)
 	case "/api/v1/server/UniProxy/user":
 		p.userFetches++
@@ -102,6 +110,18 @@ func (p *fakePanel) setUsers(users []panel.UserInfo) {
 	p.mu.Lock()
 	p.users = users
 	p.mu.Unlock()
+}
+
+func (p *fakePanel) setDown(down bool) {
+	p.mu.Lock()
+	p.down = down
+	p.mu.Unlock()
+}
+
+func (p *fakePanel) ConfigFetches() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.configFetches
 }
 
 func (p *fakePanel) setPushStatus(status int) {

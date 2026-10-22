@@ -61,10 +61,14 @@ func (c *Controller) Start(x *core.V2Core) error {
 		}
 		node = c.info
 	}
-	// Update user
+	// Update user. A panel that is unreachable now must not keep this node
+	// (or the others) from starting: the inbound stays down and the next poll
+	// fetches the list again.
 	users, err := c.apiClient.GetUserList(context.Background())
 	if err != nil {
-		return fmt.Errorf("get user list error: %s", err)
+		log.WithFields(log.Fields{"tag": node.Tag, "err": err}).
+			Error("Get user list failed, the inbound stays down until the next poll gets it")
+		users = nil
 	}
 	if users == nil {
 		users = []panel.UserInfo{}
