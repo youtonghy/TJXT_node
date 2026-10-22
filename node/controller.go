@@ -20,9 +20,12 @@ type Controller struct {
 	tag       string
 	limiter   *limiter.Limiter
 	// userList is the applied user list; desiredUsers the panel's latest list.
-	userList                []panel.UserInfo
-	desiredUsers            []panel.UserInfo
-	resync                  bool
+	userList     []panel.UserInfo
+	desiredUsers []panel.UserInfo
+	resync       bool
+	// certPending is set while a TLS node has no usable certificate; its
+	// inbound stays down and each poll requests the certificate again.
+	certPending             bool
 	aliveMap                map[int]int
 	conf                    *conf.NodeConfig
 	info                    *panel.NodeInfo
@@ -83,17 +86,16 @@ func (c *Controller) Start(x *core.V2Core) error {
 
 	// add limiter; syncUsers fills it with the users it applies.
 	c.limiter = limiter.AddLimiter(c.info.Type, c.tag, nil, c.aliveMap)
-	if node.Security == panel.Tls {
-		err = c.requestCert()
-		if err != nil {
-			return fmt.Errorf("request cert error: %s", err)
-		}
-	}
 	c.info = node
 	// An empty list is valid: the inbound stays down and polling brings it up
 	// as soon as the panel sends users.
 	c.desiredUsers = users
-	if err := c.syncUsers(); err != nil {
+	c.certPending = node.Security == panel.Tls
+	if !c.ensureCert() {
+		// Like a broken inbound below, a missing certificate only keeps this
+		// node down; the other nodes start and this one retries on each poll.
+		c.resync = true
+	} else if err := c.syncUsers(); err != nil {
 		// A node whose inbound cannot be built (e.g. a bad panel config) must not
 		// take the other nodes of this process down. syncUsers left the runtime
 		// reset, so the next poll retries from scratch, and a fixed panel config
@@ -103,6 +105,22 @@ func (c *Controller) Start(x *core.V2Core) error {
 	}
 	c.startTasks(node)
 	return nil
+}
+
+// ensureCert requests the certificate of a TLS node that does not have one
+// yet and reports whether the inbound can be built.
+func (c *Controller) ensureCert() bool {
+	if !c.certPending {
+		return true
+	}
+	if err := c.requestCert(); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).
+			Error("Request cert failed, this node stays down and retries on the next poll; the other nodes keep running")
+		return false
+	}
+	c.certPending = false
+	c.resync = true
+	return true
 }
 
 // Close implement the Close() function of the service interface

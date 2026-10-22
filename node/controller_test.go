@@ -3,6 +3,8 @@ package node
 import (
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -113,5 +115,48 @@ func TestNewNodesDoNotSeeTheirOwnConfigAsChanged(t *testing.T) {
 	info, err := n.controllers[0].apiClient.GetNodeInfo(t.Context())
 	if err != nil || info != nil {
 		t.Fatalf("unchanged config reported as new: info=%v err=%v", info != nil, err)
+	}
+}
+
+// certBlockedPanel serves a self-signed TLS vless node whose cert directory
+// cannot be created until the returned function removes the blocking file.
+func certBlockedPanel(t *testing.T) (*fakePanel, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "certs")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := newFakePanel(t, "vless", testUsers(1))
+	p.config["tls"] = 1
+	p.config["tls_settings"] = map[string]any{
+		"cert_mode":   "self",
+		"server_name": "node.test",
+		"cert_file":   filepath.Join(blocker, "node.cer"),
+		"key_file":    filepath.Join(blocker, "node.key"),
+	}
+	return p, func() {
+		if err := os.Remove(blocker); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCertFailureKeepsOnlyThisNodeDownUntilAPollFixesIt(t *testing.T) {
+	p, unblock := certBlockedPanel(t)
+	ctrl, _ := startTestController(t, p)
+	if inboundRunning(ctrl) || !ctrl.certPending {
+		t.Fatalf("missing cert: running=%v certPending=%v", inboundRunning(ctrl), ctrl.certPending)
+	}
+	poll(t, ctrl)
+	if inboundRunning(ctrl) || !ctrl.certPending {
+		t.Fatal("the cert must keep failing while its directory cannot be created")
+	}
+	unblock()
+	// The user list is unchanged (304), but the poll still retries the cert
+	// and then builds the inbound.
+	poll(t, ctrl)
+	if ctrl.certPending || !inboundRunning(ctrl) {
+		t.Fatalf("after the fix: running=%v certPending=%v", inboundRunning(ctrl), ctrl.certPending)
 	}
 }

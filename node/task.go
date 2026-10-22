@@ -116,7 +116,11 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	// nil means unchanged (304); an empty slice means the panel removed everyone.
 	if newU != nil {
 		c.desiredUsers = newU
-	} else if !c.resync {
+	}
+	if !c.ensureCert() {
+		return nil
+	}
+	if newU == nil && !c.resync {
 		log.WithField("tag", c.tag).Debug("User list no change")
 		return nil
 	}

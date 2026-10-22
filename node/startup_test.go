@@ -155,3 +155,24 @@ func TestGlobalTokenWithoutNodeIDStaysPending(t *testing.T) {
 		t.Fatalf("a global token without NodeID must not start a node: running=%d", len(n.NodeInfos))
 	}
 }
+
+func TestCertFailureDoesNotBlockOtherNodes(t *testing.T) {
+	broken, _ := certBlockedPanel(t)
+	healthy := newFakePanel(t, "vless", testUsers(1))
+	n, err := New([]conf.NodeConfig{testNodeConfig(broken.URL, 1), testNodeConfig(healthy.URL, 2)}, nil)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	startGeneration(t, n)
+	var running, down int
+	for _, c := range n.controllers {
+		if inboundRunning(c) {
+			running++
+		} else {
+			down++
+		}
+	}
+	if running != 1 || down != 1 {
+		t.Fatalf("want the healthy node up and the cert-less one down, got %d up %d down", running, down)
+	}
+}
