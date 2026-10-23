@@ -221,6 +221,11 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			inboundLink.Writer = rate.NewRateLimitWriter(inboundLink.Writer, w)
 			outboundLink.Writer = rate.NewRateLimitWriter(outboundLink.Writer, w)
 		}
+		activity := limit.Activity(user.Email,
+			sessionInbound.Source.Address.IP().String(),
+			sessionInbound.Source.Network == net.Network_TCP)
+		inboundLink.Writer = withActivity(inboundLink.Writer, activity)
+		outboundLink.Writer = withActivity(outboundLink.Writer, activity)
 		t := d.trafficCounter(sessionInbound.Tag)
 
 		ts := t.GetCounter(user.Email)
@@ -395,6 +400,9 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			sessionInbound.CanSpliceCopy = 3
 			outbound.Writer = rate.NewRateLimitWriter(outbound.Writer, w)
 		}
+		outbound.Writer = withActivity(outbound.Writer, limit.Activity(user.Email,
+			sessionInbound.Source.Address.IP().String(),
+			sessionInbound.Source.Network == net.Network_TCP))
 		t := d.trafficCounter(sessionInbound.Tag)
 
 		ts := t.GetCounter(user.Email)

@@ -37,6 +37,10 @@ type Limiter struct {
 	// writeMu serializes writers of UserLimitInfo so read-copy-update
 	// replacements do not lose each other's changes.
 	writeMu sync.Mutex
+	// activity is the last traffic time of each device; lastReport is when the
+	// previous online report was taken (unix seconds).
+	activity   activityMap
+	lastReport atomic.Int64
 }
 
 // UserLimitInfo is an immutable snapshot of a user's limits; replace it
@@ -175,9 +179,21 @@ func loadUserLimit(l *Limiter, taguuid string) (*UserLimitInfo, bool) {
 	return nil, false
 }
 
+// normalizeIP turns an IPv4-mapped IPv6 address into its IPv4 form.
+func normalizeIP(ip string) string {
+	return strings.TrimPrefix(ip, "::ffff:")
+}
+
+// tracksDevices reports whether connections of this inbound count as devices:
+// TCP sources, or the UDP-based Hysteria 2 and TUIC. WireGuard connections carry
+// the peer's tunnel address, not the client's IP.
+func (l *Limiter) tracksDevices(noUDPsource bool) bool {
+	return (noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic") &&
+		l.Nodetype != "wireguard"
+}
+
 func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (DynamicBucket *rate.DynamicBucket, Reject bool) {
-	// check if ipv4 mapped ipv6
-	ip = strings.TrimPrefix(ip, "::ffff:")
+	ip = normalizeIP(ip)
 
 	// check and gen speed limit Bucket
 	nodeLimit := l.SpeedLimit
@@ -197,11 +213,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	} else {
 		return nil, true
 	}
-	// WireGuard connections carry the peer's tunnel address, not the client's IP, so
-	// they cannot be counted as devices.
-	trackDevice := (noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic") &&
-		l.Nodetype != "wireguard"
-	if trackDevice {
+	if l.tracksDevices(noUDPsource) {
 		// Store online user for device limit
 		newipMap := new(sync.Map)
 		newipMap.Store(ip, uid)
@@ -217,7 +229,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 						oldUserOnline.Delete(ip)
 					}
 				} else if deviceLimit > 0 {
-					if deviceLimit <= aliveIp && !onlineOnOtherInbound(l, taguuid, uid, ip) {
+					if deviceLimit <= aliveIp && !onlineOnOtherInbound(l, taguuid, uid, ip) && !recentlyActive(uid, ip) {
 						oldipMap.Delete(ip)
 						return nil, true
 					}
@@ -229,7 +241,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 			}
 		} else {
 			if deviceLimit > 0 {
-				if deviceLimit <= aliveIp && !onlineOnOtherInbound(l, taguuid, uid, ip) {
+				if deviceLimit <= aliveIp && !onlineOnOtherInbound(l, taguuid, uid, ip) && !recentlyActive(uid, ip) {
 					l.UserOnlineIP.Delete(taguuid)
 					return nil, true
 				}
@@ -275,8 +287,12 @@ func onlineOnOtherInbound(self *Limiter, taguuid string, uid int, ip string) boo
 	return false
 }
 
+// GetOnlineDevice returns the devices online since the previous report: those
+// that opened a connection, and those whose connections carried traffic (a
+// long-lived connection stays online for as long as it is used).
 func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 	var onlineUser []panel.OnlineUser
+	since := l.lastReport.Swap(nowUnix())
 	oldUserOnline := new(sync.Map)
 	l.oldUserOnline.Store(oldUserOnline)
 	l.UserOnlineIP.Range(func(key, _ interface{}) bool {
@@ -294,7 +310,16 @@ func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {
 		})
 		return true
 	})
-
+	reported := make(map[activityKey]bool, len(onlineUser))
+	for _, user := range onlineUser {
+		reported[activityKey{uid: user.UID, ip: user.IP}] = true
+	}
+	for _, user := range l.activity.collect(since) {
+		if !reported[activityKey{uid: user.UID, ip: user.IP}] {
+			oldUserOnline.Store(user.IP, user.UID)
+			onlineUser = append(onlineUser, user)
+		}
+	}
 	return &onlineUser, nil
 }
 

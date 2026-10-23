@@ -131,3 +131,73 @@ func TestWireGuardIsNotCountedAsDevices(t *testing.T) {
 		t.Fatal("WireGuard tunnel addresses are not client devices")
 	}
 }
+
+// A device whose connection keeps carrying traffic stays online across reports,
+// and stays known at the device limit; an idle one is forgotten after the TTL.
+func TestLongLivedConnectionsStayOnline(t *testing.T) {
+	Init()
+	now := int64(1_000_000)
+	nowUnix = func() int64 { return now }
+	defer func() { nowUnix = func() int64 { return time.Now().Unix() } }()
+
+	l := AddLimiter("vless", testTag, users(1, 2, 0), map[int]int{1: 0})
+	key := format.UserTag(testTag, "uuid-1")
+	if _, reject := l.CheckLimit(key, "1.1.1.1", true); reject {
+		t.Fatal("first device must be accepted")
+	}
+	activity := l.Activity(key, "1.1.1.1", true)
+	if activity == nil {
+		t.Fatal("a known user's TCP device is tracked")
+	}
+	online := func() []panel.OnlineUser {
+		users, err := l.GetOnlineDevice()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return *users
+	}
+	if got := online(); len(got) != 1 {
+		t.Fatalf("first report: %+v", got)
+	}
+	// Two reports later the connection still carries traffic: still online.
+	now += 60
+	if got := online(); len(got) != 0 {
+		t.Fatalf("idle window: %+v", got)
+	}
+	now += 60
+	activity.Touch()
+	now += 30
+	if got := online(); len(got) != 1 || got[0].IP != "1.1.1.1" {
+		t.Fatalf("long-lived connection dropped: %+v", got)
+	}
+	// At the limit the recently active IP opens another connection: not a new device.
+	l.SetAliveList(map[int]int{1: 2})
+	if _, reject := l.CheckLimit(key, "1.1.1.1", true); reject {
+		t.Fatal("a recently active device is not new")
+	}
+	if _, reject := l.CheckLimit(key, "2.2.2.2", true); !reject {
+		t.Fatal("a new IP at the limit must be rejected")
+	}
+	// Idle beyond the TTL: forgotten.
+	now += int64(activityTTL/time.Second) + 1
+	online()
+	if recentlyActive(1, "1.1.1.1") {
+		t.Fatal("an idle device is forgotten after the TTL")
+	}
+}
+
+func TestUDPAndWireGuardConnectionsAreNotTracked(t *testing.T) {
+	Init()
+	vless := AddLimiter("vless", testTag, users(1, 2, 0), nil)
+	if vless.Activity(format.UserTag(testTag, "uuid-1"), "1.1.1.1", false) != nil {
+		t.Fatal("UDP sources of TCP-based inbounds are not devices")
+	}
+	hy2 := AddLimiter("hysteria2", "[panel]-hysteria2:5", users(1, 2, 0), nil)
+	if hy2.Activity(format.UserTag("[panel]-hysteria2:5", "uuid-1"), "1.1.1.1", false) == nil {
+		t.Fatal("Hysteria 2 clients are devices")
+	}
+	wg := AddLimiter("wireguard", "[panel]-wireguard:6", users(1, 2, 0), nil)
+	if wg.Activity(format.UserTag("[panel]-wireguard:6", "uuid-1"), "10.0.0.2", true) != nil {
+		t.Fatal("WireGuard tunnel addresses are not devices")
+	}
+}
