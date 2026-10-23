@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/youtonghy/TJXT_node/api/panel"
 )
 
 var (
@@ -22,6 +23,7 @@ var versionCommand = cobra.Command{
 
 func init() {
 	command.AddCommand(&versionCommand)
+	panel.AgentVersion = version
 }
 
 func showVersion() {

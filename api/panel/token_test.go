@@ -58,3 +58,22 @@ func TestTokenOnlyInHeader(t *testing.T) {
 		})
 	}
 }
+
+// Every request names the agent, its Xray core and its features.
+func TestRequestsIdentifyTheAgent(t *testing.T) {
+	p := newFakePanel(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		_, _ = w.Write([]byte(`{"users":[]}`))
+	})
+	c := newTestClient(t, p.URL, "v1")
+	if _, err := c.GetUserList(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	req := p.Requests()[0]
+	if !strings.HasPrefix(req.Header.Get("User-Agent"), "tjxt-node/") ||
+		!strings.Contains(req.Header.Get("User-Agent"), " xray/") {
+		t.Fatalf("user agent %q", req.Header.Get("User-Agent"))
+	}
+	if !strings.Contains(req.Header.Get(FeaturesHeader), "revoked-users") {
+		t.Fatalf("features %q", req.Header.Get(FeaturesHeader))
+	}
+}

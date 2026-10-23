@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -99,7 +98,8 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		retryCount = *c.RetryCount
 	}
 	client.SetRetryCount(retryCount)
-	client.SetHeader("User-Agent", fmt.Sprintf("tjxt-node go-resty/%s", resty.Version))
+	client.SetHeader("User-Agent", userAgent())
+	client.SetHeader(FeaturesHeader, featuresHeader())
 	client.SetHeader("X-Server-Token", c.Key)
 	if c.Timeout > 0 {
 		client.SetTimeout(time.Duration(c.Timeout) * time.Second)
