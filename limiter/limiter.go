@@ -197,7 +197,11 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	} else {
 		return nil, true
 	}
-	if noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic" {
+	// WireGuard connections carry the peer's tunnel address, not the client's IP, so
+	// they cannot be counted as devices.
+	trackDevice := (noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic") &&
+		l.Nodetype != "wireguard"
+	if trackDevice {
 		// Store online user for device limit
 		newipMap := new(sync.Map)
 		newipMap.Store(ip, uid)
@@ -213,7 +217,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 						oldUserOnline.Delete(ip)
 					}
 				} else if deviceLimit > 0 {
-					if deviceLimit <= aliveIp {
+					if deviceLimit <= aliveIp && !onlineOnOtherInbound(l, taguuid, uid, ip) {
 						oldipMap.Delete(ip)
 						return nil, true
 					}
@@ -225,7 +229,7 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 			}
 		} else {
 			if deviceLimit > 0 {
-				if deviceLimit <= aliveIp {
+				if deviceLimit <= aliveIp && !onlineOnOtherInbound(l, taguuid, uid, ip) {
 					l.UserOnlineIP.Delete(taguuid)
 					return nil, true
 				}
@@ -243,6 +247,32 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 	} else {
 		return nil, false
 	}
+}
+
+// onlineOnOtherInbound reports whether ip is already online for uid on another
+// inbound of this node, in the current or the previous report window. Such an IP
+// is already part of the panel's device count, so it is not a new device.
+func onlineOnOtherInbound(self *Limiter, taguuid string, uid int, ip string) bool {
+	uuid := taguuid
+	if i := strings.LastIndex(taguuid, "|"); i >= 0 {
+		uuid = taguuid[i+1:]
+	}
+	limitLock.RLock()
+	defer limitLock.RUnlock()
+	for tag, other := range limiter {
+		if other == self {
+			continue
+		}
+		if v, ok := other.oldUserOnline.Load().Load(ip); ok && v.(int) == uid {
+			return true
+		}
+		if v, ok := other.UserOnlineIP.Load(format.UserTag(tag, uuid)); ok {
+			if owner, ok := v.(*sync.Map).Load(ip); ok && owner.(int) == uid {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (l *Limiter) GetOnlineDevice() (*[]panel.OnlineUser, error) {

@@ -92,3 +92,42 @@ func TestConcurrentAccess(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// An IP the user already has online on another inbound of this node is part of the
+// panel's device count, so reaching the limit must not lock it out of other inbounds.
+func TestDeviceLimitAcceptsAnIPOnlineOnAnotherInbound(t *testing.T) {
+	Init()
+	const otherTag = "[panel]-vmess:2"
+	first := AddLimiter("vless", testTag, users(1, 2, 0), map[int]int{1: 0})
+	second := AddLimiter("vmess", otherTag, users(1, 2, 0), map[int]int{1: 0})
+	if _, reject := first.CheckLimit(format.UserTag(testTag, "uuid-1"), "1.1.1.1", true); reject {
+		t.Fatal("first device must be accepted")
+	}
+	first.SetAliveList(map[int]int{1: 2})
+	second.SetAliveList(map[int]int{1: 2})
+	if _, reject := second.CheckLimit(format.UserTag(otherTag, "uuid-1"), "1.1.1.1", true); reject {
+		t.Fatal("an IP online on another inbound is not a new device")
+	}
+	if _, reject := second.CheckLimit(format.UserTag(otherTag, "uuid-1"), "2.2.2.2", true); !reject {
+		t.Fatal("a new IP at the limit must be rejected")
+	}
+	// After a report window the IP is only in the previous window of the first inbound.
+	if _, err := first.GetOnlineDevice(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.GetOnlineDevice(); err != nil {
+		t.Fatal(err)
+	}
+	third := AddLimiter("trojan", "[panel]-trojan:3", users(1, 2, 0), map[int]int{1: 2})
+	if _, reject := third.CheckLimit(format.UserTag("[panel]-trojan:3", "uuid-1"), "1.1.1.1", true); reject {
+		t.Fatal("an IP from the previous window of another inbound is not a new device")
+	}
+}
+
+func TestWireGuardIsNotCountedAsDevices(t *testing.T) {
+	Init()
+	l := AddLimiter("wireguard", "[panel]-wireguard:4", users(1, 2, 0), map[int]int{1: 2})
+	if _, reject := l.CheckLimit(format.UserTag("[panel]-wireguard:4", "uuid-1"), "10.0.0.2", true); reject {
+		t.Fatal("WireGuard tunnel addresses are not client devices")
+	}
+}
