@@ -137,3 +137,44 @@ func TestPollAndReportConcurrently(t *testing.T) {
 		_ = ctrl.reportUserTrafficTask(t.Context())
 	}
 }
+
+// Traffic the panel did not take before the counters go away is kept on disk and
+// reported first on the next push, under its original batch IDs.
+func TestUnreportedTrafficIsSpooledAndReportedLater(t *testing.T) {
+	t.Setenv("TJXT_SPOOL_DIR", t.TempDir())
+	p := newFakePanel(t, "vless", testUsers(1))
+	ctrl, x := startTestController(t, p)
+	counter := x.TrafficCounter(ctrl.tag)
+	email := format.UserTag(ctrl.tag, testUsers(1)[0].Uuid)
+	counter.Tx(email, 1000)
+
+	p.setPushStatus(http.StatusServiceUnavailable)
+	if _, err := ctrl.flushTraffic(t.Context(), 0); err == nil {
+		t.Fatal("expected the push to fail")
+	}
+	pending := ctrl.pendingTraffic.ID
+	counter.Tx(email, 7)
+	ctrl.flushAll("closing")
+	if up := counter.GetUpCount(email); up != 0 {
+		t.Fatalf("spooled bytes stay in the counters: %d", up)
+	}
+	spooled, err := loadSpool(ctrl.tag)
+	if err != nil || len(spooled) != 2 || spooled[0].ID != pending ||
+		spooled[0].Traffic[0].Upload != 1000 || spooled[1].Traffic[0].Upload != 7 {
+		t.Fatalf("spool: %+v, %v", spooled, err)
+	}
+
+	p.setPushStatus(http.StatusOK)
+	before := len(p.Pushes())
+	if err := ctrl.reportSpool(t.Context()); err != nil {
+		t.Fatalf("report spool: %v", err)
+	}
+	pushes := p.Pushes()[before:]
+	if len(pushes) != 2 || pushes[0].BatchID != pending || pushes[0].Traffic["1"] != [2]int64{1000, 0} ||
+		pushes[1].Traffic["1"] != [2]int64{7, 0} {
+		t.Fatalf("spooled pushes: %+v", pushes)
+	}
+	if spooled, _ := loadSpool(ctrl.tag); len(spooled) != 0 {
+		t.Fatalf("reported batches stay spooled: %+v", spooled)
+	}
+}

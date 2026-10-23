@@ -158,14 +158,45 @@ func (c *Controller) flushAll(reason string) {
 	for range 2 {
 		traffic, err := c.flushTraffic(ctx, 0)
 		if err != nil {
-			log.WithFields(log.Fields{"tag": c.tag, "reason": reason, "err": err}).
-				Error("Traffic report before removing counters failed, unreported traffic is dropped")
+			c.spoolRemaining(reason, err)
 			return
 		}
 		if len(traffic) == 0 {
 			return
 		}
 	}
+}
+
+// spoolRemaining keeps the traffic the panel did not accept (the pending batch and
+// whatever the counters still hold) on disk, since the counters are about to go
+// away; the next push reports it under its original batch IDs.
+func (c *Controller) spoolRemaining(reason string, reportErr error) {
+	c.trafficMu.Lock()
+	defer c.trafficMu.Unlock()
+	var batches []spooledBatch
+	if c.pendingTraffic != nil {
+		batches = append(batches, spooledBatch{ID: c.pendingTraffic.ID, Traffic: c.pendingTraffic.Traffic()})
+	}
+	// The pending batch's bytes are still in the counters: take them out before
+	// snapshotting the rest, so nothing is spooled twice.
+	c.server.AckTraffic(c.pendingTraffic)
+	c.pendingTraffic = nil
+	c.pendingRejects = 0
+	rest := c.server.SnapshotTraffic(c.tag, 0)
+	if rest != nil {
+		batches = append(batches, spooledBatch{ID: rest.ID, Traffic: rest.Traffic()})
+		c.server.AckTraffic(rest)
+	}
+	fields := log.Fields{"tag": c.tag, "reason": reason, "report_err": reportErr, "batches": len(batches)}
+	if len(batches) == 0 {
+		return
+	}
+	if err := spoolTraffic(c.tag, batches...); err != nil {
+		fields["err"] = err
+		log.WithFields(fields).Error("Traffic report failed and keeping it on disk failed too, unreported traffic is dropped")
+		return
+	}
+	log.WithFields(fields).Warn("Traffic report failed, kept on disk and reported on the next push")
 }
 
 // syncUsers moves the runtime from the applied user list (c.userList) to the

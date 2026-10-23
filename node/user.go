@@ -14,6 +14,9 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	if c.info.Common.BaseConfig != nil {
 		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
+	if err := c.reportSpool(ctx); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Reporting spooled traffic failed, it is kept and retried")
+	}
 	userTraffic, err := c.flushTraffic(ctx, c.reportMinTraffic())
 	if err != nil {
 		log.WithFields(log.Fields{
