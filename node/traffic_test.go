@@ -178,3 +178,41 @@ func TestUnreportedTrafficIsSpooledAndReportedLater(t *testing.T) {
 		t.Fatalf("reported batches stay spooled: %+v", spooled)
 	}
 }
+
+// A user the panel revokes in a push answer is disconnected at once and stays
+// removed until the panel sends a changed user list.
+func TestRevokedUsersAreRemovedUntilTheListChanges(t *testing.T) {
+	p := newFakePanel(t, "vless", testUsers(1, 2))
+	ctrl, x := startTestController(t, p)
+	ids := func() []int {
+		var ids []int
+		for _, user := range ctrl.userList {
+			ids = append(ids, user.Id)
+		}
+		return ids
+	}
+	x.TrafficCounter(ctrl.tag).Tx(format.UserTag(ctrl.tag, testUsers(2)[0].Uuid), 10)
+	p.setRevoked([]int{2})
+	if err := ctrl.reportUserTrafficTask(t.Context()); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	if got := ids(); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("revoked user still served: %v", got)
+	}
+	p.setRevoked(nil)
+	// The panel's list is unchanged (304): the revocation holds.
+	if err := ctrl.nodeInfoMonitor(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(); len(got) != 1 {
+		t.Fatalf("an unchanged list brought the revoked user back: %v", got)
+	}
+	// A changed list is applied as is.
+	p.setUsers(testUsers(1, 2, 3))
+	if err := ctrl.nodeInfoMonitor(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(); len(got) != 3 {
+		t.Fatalf("changed list not applied: %v", got)
+	}
+}

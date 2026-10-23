@@ -38,6 +38,13 @@ type Controller struct {
 	pendingTraffic *core.TrafficBatch
 	// pendingRejects counts permanent rejections of pendingTraffic.
 	pendingRejects int
+	// revokedByPush collects users the panel revoked in push answers, until the
+	// report task removes them (guarded by trafficMu).
+	revokedByPush []int
+	// usersMu serializes changes of the user lists (polls and revocations).
+	usersMu sync.Mutex
+	// revoked users stay removed until the panel sends a changed user list.
+	revoked map[int]bool
 }
 
 // NewController return a Node controller with default parameters.
@@ -197,6 +204,44 @@ func (c *Controller) spoolRemaining(reason string, reportErr error) {
 		return
 	}
 	log.WithFields(fields).Warn("Traffic report failed, kept on disk and reported on the next push")
+}
+
+// takeRevoked returns and clears the users revoked by push answers.
+func (c *Controller) takeRevoked() []int {
+	c.trafficMu.Lock()
+	defer c.trafficMu.Unlock()
+	ids := c.revokedByPush
+	c.revokedByPush = nil
+	return ids
+}
+
+// revokeUsers disconnects users the panel says lost access, without waiting for
+// the next user list poll. They stay removed until the panel sends a changed
+// list, which is then applied as is (a stale list can only delay a revocation).
+func (c *Controller) revokeUsers(ids []int) {
+	c.usersMu.Lock()
+	defer c.usersMu.Unlock()
+	if c.revoked == nil {
+		c.revoked = make(map[int]bool)
+	}
+	for _, id := range ids {
+		c.revoked[id] = true
+	}
+	kept := make([]panel.UserInfo, 0, len(c.desiredUsers))
+	for _, user := range c.desiredUsers {
+		if !c.revoked[user.Id] {
+			kept = append(kept, user)
+		}
+	}
+	if len(kept) == len(c.desiredUsers) {
+		return
+	}
+	c.desiredUsers = kept
+	if err := c.syncUsers(); err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Removing revoked users failed, retrying on next poll")
+		return
+	}
+	log.WithFields(log.Fields{"tag": c.tag, "users": ids}).Info("Disconnected users the panel revoked")
 }
 
 // syncUsers moves the runtime from the applied user list (c.userList) to the

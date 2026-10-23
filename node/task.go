@@ -113,9 +113,13 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		c.aliveMap = newA
 		c.limiter.SetAliveList(newA)
 	}
+	c.usersMu.Lock()
+	defer c.usersMu.Unlock()
 	// nil means unchanged (304); an empty slice means the panel removed everyone.
+	// A changed list supersedes revocations from push answers.
 	if newU != nil {
 		c.desiredUsers = newU
+		c.revoked = nil
 	}
 	if !c.ensureCert() {
 		return nil

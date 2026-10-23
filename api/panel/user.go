@@ -329,6 +329,10 @@ type PushResult struct {
 	RejectedUserIDs []int `json:"rejected_user_ids"`
 	// RetrySafe reports whether the panel deduplicates this batch by its ID.
 	RetrySafe bool `json:"retry_safe"`
+	// RevokedUserIDs lists users who just lost access to this node (quota used
+	// up, package ended); the node disconnects them without waiting for its next
+	// user list poll.
+	RevokedUserIDs []int `json:"revoked_user_ids"`
 }
 
 // trafficPushBody is the wrapped push payload accepted by the panel:
@@ -381,6 +385,7 @@ func (c *Client) ReportUserTraffic(ctx context.Context, batchID string, userTraf
 			return nil, err
 		}
 		merged.RejectedUserIDs = append(merged.RejectedUserIDs, result.RejectedUserIDs...)
+		merged.RevokedUserIDs = append(merged.RevokedUserIDs, result.RevokedUserIDs...)
 		merged.RetrySafe = merged.RetrySafe && result.RetrySafe
 	}
 	return merged, nil

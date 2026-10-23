@@ -36,6 +36,8 @@ type fakePanel struct {
 	// down makes every endpoint answer 503, like a panel being deployed.
 	down          bool
 	configFetches int
+	// revoked is sent as revoked_user_ids in push answers.
+	revoked []int
 }
 
 func newFakePanel(t *testing.T, protocol string, users []panel.UserInfo) *fakePanel {
@@ -100,10 +102,20 @@ func (p *fakePanel) serve(w http.ResponseWriter, r *http.Request) {
 		rec.Header = r.Header.Get(panel.TrafficBatchHeader)
 		p.pushes = append(p.pushes, rec)
 		w.WriteHeader(p.pushStatus)
-		_, _ = w.Write([]byte(`{"data":true,"rejected_user_ids":[],"retry_safe":true}`))
+		answer, _ := json.Marshal(map[string]any{
+			"data": true, "rejected_user_ids": []int{}, "retry_safe": true,
+			"revoked_user_ids": p.revoked,
+		})
+		_, _ = w.Write(answer)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (p *fakePanel) setRevoked(ids []int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.revoked = ids
 }
 
 func (p *fakePanel) setUsers(users []panel.UserInfo) {

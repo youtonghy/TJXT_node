@@ -18,6 +18,9 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Reporting spooled traffic failed, it is kept and retried")
 	}
 	userTraffic, err := c.flushTraffic(ctx, c.reportMinTraffic())
+	if revoked := c.takeRevoked(); len(revoked) > 0 {
+		c.revokeUsers(revoked)
+	}
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
@@ -119,6 +122,9 @@ func (c *Controller) flushTraffic(ctx context.Context, minTraffic int) ([]panel.
 	c.server.AckTraffic(batch)
 	c.pendingTraffic = nil
 	c.pendingRejects = 0
+	if result != nil && len(result.RevokedUserIDs) > 0 {
+		c.revokedByPush = append(c.revokedByPush, result.RevokedUserIDs...)
+	}
 	if result != nil && len(result.RejectedUserIDs) > 0 {
 		log.WithFields(log.Fields{
 			"tag":   c.tag,

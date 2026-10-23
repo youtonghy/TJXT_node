@@ -16,6 +16,7 @@ Authenticate with `X-Server-Token: <per-node server_key>` only; the key is never
 - A rejected key is HTTP 401/403 or any answer whose body has `"error_code": "node_unauthorized"` (the panel uses 400). It is logged as a possibly rotated key and retried; traffic batches are kept, not dropped.
 
 - Traffic is pushed in batches with a stable `batch_id` (v1 also sends `X-Traffic-Batch-Id`). A batch is resent unchanged until the panel accepts it, and only then subtracted from the counters, so failed pushes and reloads do not lose traffic. When the counters go away before the panel accepts them (the node stops, users are removed, the panel is unreachable), the traffic is written to `/etc/tjxt-node/spool` (`TJXT_SPOOL_DIR` overrides it) and reported first on the next push, under its original batch IDs.
+- A push answer may list `revoked_user_ids` (quota used up, package ended): those users are disconnected at once and stay removed until the panel sends a changed user list.
 - Online devices are the IPs whose connections carried traffic since the previous report, so long-lived connections stay counted. At the device limit, an IP active on any inbound of the node within five minutes is not a new device.
 - An empty user list is valid: the inbound stays down and comes up when users appear. A 304 means unchanged.
 - Private, loopback, link-local and metadata destinations are blocked unless the panel sets `base_config.allow_private_egress: true` for the node.
