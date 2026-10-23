@@ -49,6 +49,14 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	return c.getUserListV1(ctx)
 }
 
+// userPageSize is the page size asked for when a panel answers with only part of
+// the list (a non-null next_cursor). Current panels send the whole list.
+const userPageSize = 500
+
+// maxUserPages bounds the pages read for one list so a panel that keeps returning
+// a cursor cannot keep the node fetching forever.
+const maxUserPages = 10_000
+
 func (c *Client) getUserListV3(ctx context.Context) ([]UserInfo, error) {
 	r, body, err := c.callV3(ctx, "GET", "server/UniProxy/user", identityParams(c), c.getUserEtag())
 	if err != nil {
@@ -57,22 +65,68 @@ func (c *Client) getUserListV3(ctx context.Context) ([]UserInfo, error) {
 	if r.StatusCode() == http.StatusNotModified {
 		return nil, nil
 	}
-	users, err := decodeUserListJSON(bytes.NewReader(body))
+	page, err := decodeUserListJSON(bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("decode v3 user list: %w", err)
+	}
+	users, err := c.readRemainingUsers(ctx, page, c.getUserPageV3)
+	if err != nil {
+		return nil, err
 	}
 	c.setUserEtag(r.Header().Get("ETag"))
 	return users, nil
 }
 
+func (c *Client) getUserPageV3(ctx context.Context, afterID int64) (userListPage, error) {
+	params := identityParams(c)
+	params["limit"] = userPageSize
+	params["after_id"] = afterID
+	_, body, err := c.callV3(ctx, "GET", "server/UniProxy/user", params, "")
+	if err != nil {
+		return userListPage{}, err
+	}
+	page, err := decodeUserListJSON(bytes.NewReader(body))
+	if err != nil {
+		return userListPage{}, fmt.Errorf("decode v3 user page: %w", err)
+	}
+	return page, nil
+}
+
+// readRemainingUsers appends the pages after first while the panel returns a
+// cursor. Taking only the first page would silently drop every later user.
+func (c *Client) readRemainingUsers(
+	ctx context.Context,
+	first userListPage,
+	next func(context.Context, int64) (userListPage, error),
+) ([]UserInfo, error) {
+	users := first.Users
+	cursor := first.NextCursor
+	for pages := 1; cursor != nil; pages++ {
+		if pages >= maxUserPages {
+			return nil, fmt.Errorf("user list has more than %d pages", maxUserPages)
+		}
+		page, err := next(ctx, *cursor)
+		if err != nil {
+			return nil, fmt.Errorf("get user page after %d: %w", *cursor, err)
+		}
+		if page.NextCursor != nil && *page.NextCursor <= *cursor {
+			return nil, fmt.Errorf("user list cursor did not advance past %d", *cursor)
+		}
+		users = append(users, page.Users...)
+		cursor = page.NextCursor
+	}
+	return users, nil
+}
+
+const userListPathV1 = "/api/v1/server/UniProxy/user"
+
 func (c *Client) getUserListV1(ctx context.Context) ([]UserInfo, error) {
-	const path = "/api/v1/server/UniProxy/user"
 	r, err := c.client.R().
 		SetContext(ctx).
 		SetHeader("If-None-Match", c.getUserEtag()).
 		SetHeader("X-Response-Format", "msgpack").
 		SetDoNotParseResponse(true).
-		Get(path)
+		Get(userListPathV1)
 	if err != nil {
 		return nil, err
 	}
@@ -84,21 +138,53 @@ func (c *Client) getUserListV1(ctx context.Context) ([]UserInfo, error) {
 	if r.StatusCode() == http.StatusNotModified {
 		return nil, nil
 	}
-	if r.StatusCode() < 200 || r.StatusCode() >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(r.RawResponse.Body, 240))
-		return nil, fmt.Errorf("get user list: %s: %s", r.Status(), body)
-	}
-	var users []UserInfo
-	if isMsgpack(r.Header().Get("Content-Type")) {
-		users, err = decodeUserListMsgpack(r.RawResponse.Body)
-	} else {
-		users, err = decodeUserListJSON(r.RawResponse.Body)
-	}
+	page, err := decodeUserListResponse(r)
 	if err != nil {
-		return nil, fmt.Errorf("decode user list error: %w", err)
+		return nil, err
+	}
+	users, err := c.readRemainingUsers(ctx, page, c.getUserPageV1)
+	if err != nil {
+		return nil, err
 	}
 	c.setUserEtag(r.Header().Get("ETag"))
 	return users, nil
+}
+
+func (c *Client) getUserPageV1(ctx context.Context, afterID int64) (userListPage, error) {
+	r, err := c.client.R().
+		SetContext(ctx).
+		SetHeader("X-Response-Format", "msgpack").
+		SetQueryParam("limit", strconv.Itoa(userPageSize)).
+		SetQueryParam("after_id", strconv.FormatInt(afterID, 10)).
+		SetDoNotParseResponse(true).
+		Get(userListPathV1)
+	if err != nil {
+		return userListPage{}, err
+	}
+	if r == nil || r.RawResponse == nil {
+		return userListPage{}, fmt.Errorf("received nil response or raw response")
+	}
+	defer r.RawResponse.Body.Close()
+	return decodeUserListResponse(r)
+}
+
+// decodeUserListResponse decodes a 2xx user list response body (msgpack or JSON).
+func decodeUserListResponse(r *resty.Response) (userListPage, error) {
+	if r.StatusCode() < 200 || r.StatusCode() >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(r.RawResponse.Body, 240))
+		return userListPage{}, fmt.Errorf("get user list: %s: %s", r.Status(), body)
+	}
+	var page userListPage
+	var err error
+	if isMsgpack(r.Header().Get("Content-Type")) {
+		page, err = decodeUserListMsgpack(r.RawResponse.Body)
+	} else {
+		page, err = decodeUserListJSON(r.RawResponse.Body)
+	}
+	if err != nil {
+		return userListPage{}, fmt.Errorf("decode user list error: %w", err)
+	}
+	return page, nil
 }
 
 // isMsgpack reports whether a Content-Type is msgpack; the panel answers with
@@ -110,65 +196,100 @@ func isMsgpack(contentType string) bool {
 
 var errMissingUsers = errors.New(`response has no "users" array`)
 
-// decodeUserListMsgpack decodes {"users": [...]} and returns a non-nil slice.
-func decodeUserListMsgpack(r io.Reader) ([]UserInfo, error) {
-	var body struct {
-		Users *[]UserInfo `msgpack:"users"`
-	}
-	if err := msgpack.NewDecoder(r).Decode(&body); err != nil {
-		return nil, err
-	}
-	if body.Users == nil || *body.Users == nil {
-		return nil, errMissingUsers
-	}
-	return *body.Users, nil
+// userListPage is one user list response. NextCursor is set when the panel sent
+// only part of the list; the rest follows with after_id=NextCursor.
+type userListPage struct {
+	Users      []UserInfo
+	NextCursor *int64
 }
 
-// decodeUserListJSON streams {"users": [...]} without buffering the whole list.
-// Only the top-level "users" member is used; other members are skipped even if
-// their value is the string "users". An empty array yields a non-nil empty slice.
-func decodeUserListJSON(r io.Reader) ([]UserInfo, error) {
+// decodeUserListMsgpack decodes {"users": [...], "next_cursor": n|null}; Users is
+// a non-nil slice.
+func decodeUserListMsgpack(r io.Reader) (userListPage, error) {
+	var body struct {
+		Users      *[]UserInfo `msgpack:"users"`
+		NextCursor *int64      `msgpack:"next_cursor"`
+	}
+	if err := msgpack.NewDecoder(r).Decode(&body); err != nil {
+		return userListPage{}, err
+	}
+	if body.Users == nil || *body.Users == nil {
+		return userListPage{}, errMissingUsers
+	}
+	return userListPage{Users: *body.Users, NextCursor: body.NextCursor}, nil
+}
+
+// decodeUserListJSON streams {"users": [...], "next_cursor": n|null} without
+// buffering the whole list. Only top-level members are used; other members are
+// skipped even if their value is the string "users". An empty array yields a
+// non-nil empty slice.
+func decodeUserListJSON(r io.Reader) (userListPage, error) {
 	dec := jsontext.NewDecoder(r)
+	tok, err := dec.ReadToken()
+	if err != nil {
+		return userListPage{}, err
+	}
+	if tok.Kind() != '{' {
+		return userListPage{}, fmt.Errorf("expected a JSON object, got %v", tok.Kind())
+	}
+	var page userListPage
+	for dec.PeekKind() != '}' {
+		key, err := dec.ReadToken()
+		if err != nil {
+			return userListPage{}, err
+		}
+		switch key.String() {
+		case "users":
+			if page.Users, err = decodeUserArray(dec); err != nil {
+				return userListPage{}, err
+			}
+		case "next_cursor":
+			val, err := dec.ReadValue()
+			if err != nil {
+				return userListPage{}, err
+			}
+			if err := json.Unmarshal(val, &page.NextCursor); err != nil {
+				return userListPage{}, fmt.Errorf("decode next_cursor: %w", err)
+			}
+		default:
+			if err := dec.SkipValue(); err != nil {
+				return userListPage{}, err
+			}
+		}
+	}
+	if _, err := dec.ReadToken(); err != nil {
+		return userListPage{}, err
+	}
+	if page.Users == nil {
+		return userListPage{}, errMissingUsers
+	}
+	return page, nil
+}
+
+func decodeUserArray(dec *jsontext.Decoder) ([]UserInfo, error) {
 	tok, err := dec.ReadToken()
 	if err != nil {
 		return nil, err
 	}
-	if tok.Kind() != '{' {
-		return nil, fmt.Errorf("expected a JSON object, got %v", tok.Kind())
+	if tok.Kind() != '[' {
+		return nil, errMissingUsers
 	}
-	for dec.PeekKind() != '}' {
-		key, err := dec.ReadToken()
+	users := make([]UserInfo, 0)
+	for dec.PeekKind() != ']' {
+		val, err := dec.ReadValue()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("read user object: %w", err)
 		}
-		if key.String() != "users" {
-			if err := dec.SkipValue(); err != nil {
-				return nil, err
-			}
-			continue
+		var u UserInfo
+		if err := json.Unmarshal(val, &u); err != nil {
+			return nil, fmt.Errorf("unmarshal user error: %w", err)
 		}
-		tok, err := dec.ReadToken()
-		if err != nil {
-			return nil, err
-		}
-		if tok.Kind() != '[' {
-			return nil, errMissingUsers
-		}
-		users := make([]UserInfo, 0)
-		for dec.PeekKind() != ']' {
-			val, err := dec.ReadValue()
-			if err != nil {
-				return nil, fmt.Errorf("read user object: %w", err)
-			}
-			var u UserInfo
-			if err := json.Unmarshal(val, &u); err != nil {
-				return nil, fmt.Errorf("unmarshal user error: %w", err)
-			}
-			users = append(users, u)
-		}
-		return users, nil
+		users = append(users, u)
 	}
-	return nil, errMissingUsers
+	if _, err := dec.ReadToken(); err != nil {
+		return nil, err
+	}
+	return users, nil
 }
 
 // GetUserAlive fetches the panel-wide alive IP count per user.
@@ -240,10 +361,32 @@ func decodePushResult(body []byte) (*PushResult, error) {
 	return result, nil
 }
 
+// maxPushEntries is the most users the panel accepts in one push.
+const maxPushEntries = 2000
+
 // ReportUserTraffic reports one traffic batch. The batch ID lets the panel apply a
 // retried batch exactly once, so callers must resend the same ID and content until
-// this returns nil.
+// this returns nil. A batch with more users than one push may carry is sent in
+// parts with IDs "<batchID>.<n>"; the parts depend only on the batch content, so a
+// retry resends parts the panel already applied under the same IDs.
 func (c *Client) ReportUserTraffic(ctx context.Context, batchID string, userTraffic []UserTraffic) (*PushResult, error) {
+	if len(userTraffic) <= maxPushEntries {
+		return c.reportTrafficPart(ctx, batchID, userTraffic)
+	}
+	merged := &PushResult{RetrySafe: true}
+	for part, start := 0, 0; start < len(userTraffic); part, start = part+1, start+maxPushEntries {
+		end := min(start+maxPushEntries, len(userTraffic))
+		result, err := c.reportTrafficPart(ctx, fmt.Sprintf("%s.%d", batchID, part), userTraffic[start:end])
+		if err != nil {
+			return nil, err
+		}
+		merged.RejectedUserIDs = append(merged.RejectedUserIDs, result.RejectedUserIDs...)
+		merged.RetrySafe = merged.RetrySafe && result.RetrySafe
+	}
+	return merged, nil
+}
+
+func (c *Client) reportTrafficPart(ctx context.Context, batchID string, userTraffic []UserTraffic) (*PushResult, error) {
 	body := newTrafficPushBody(batchID, userTraffic)
 	if c.v3Available() {
 		params := identityParams(c)

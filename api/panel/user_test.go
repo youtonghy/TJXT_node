@@ -108,3 +108,61 @@ func TestReportNodeOnlineUsersV1FailsOnErrorStatus(t *testing.T) {
 		t.Fatal("expected an error on 502")
 	}
 }
+
+// A batch larger than one push is sent in parts with stable part IDs, so a retry
+// after a failed part replays the same parts.
+func TestReportUserTrafficSplitsLargeBatches(t *testing.T) {
+	fail := true
+	p := newFakePanel(t, func(w http.ResponseWriter, _ *http.Request, body []byte) {
+		var call struct {
+			Params struct {
+				BatchID string `json:"batch_id"`
+			} `json:"params"`
+		}
+		_ = json.Unmarshal(body, &call)
+		if call.Params.BatchID == "big.1" && fail {
+			fail = false
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"data":true,"rejected_user_ids":[],"retry_safe":true}`))
+	})
+	c := newTestClient(t, p.URL, "v3")
+	traffic := make([]UserTraffic, maxPushEntries*2+1)
+	for i := range traffic {
+		traffic[i] = UserTraffic{UID: i + 1, Upload: 1}
+	}
+	if _, err := c.ReportUserTraffic(context.Background(), "big", traffic); err == nil {
+		t.Fatal("a failed part must fail the batch")
+	}
+	result, err := c.ReportUserTraffic(context.Background(), "big", traffic)
+	if err != nil || !result.RetrySafe {
+		t.Fatalf("retry: %+v, %v", result, err)
+	}
+	var ids []string
+	for _, req := range p.Requests() {
+		var call struct {
+			Params struct {
+				BatchID string              `json:"batch_id"`
+				Traffic map[string][2]int64 `json:"traffic"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(req.Body, &call); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(call.Params.Traffic) > maxPushEntries {
+			t.Fatalf("part %s has %d entries", call.Params.BatchID, len(call.Params.Traffic))
+		}
+		ids = append(ids, call.Params.BatchID)
+	}
+	want := []string{"big.0", "big.1", "big.0", "big.1", "big.2"}
+	if len(ids) != len(want) {
+		t.Fatalf("part IDs %v, want %v", ids, want)
+	}
+	for i := range want {
+		if ids[i] != want[i] {
+			t.Fatalf("part IDs %v, want %v", ids, want)
+		}
+	}
+}
