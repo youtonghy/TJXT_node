@@ -36,3 +36,21 @@ func userAgent() string {
 func featuresHeader() string {
 	return strings.Join(AgentFeatures, ",")
 }
+
+// CertFingerprintHeader carries the hex SHA-256 of the node's TLS certificate (DER),
+// the value Xray clients pin with pinnedPeerCertSha256.
+const CertFingerprintHeader = "X-TJXT-Cert-SHA256"
+
+// SetCertFingerprint reports the node's certificate fingerprint on later requests;
+// an empty one stops reporting it.
+func (c *Client) SetCertFingerprint(fingerprint string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.certSHA256 = fingerprint
+}
+
+func (c *Client) certFingerprint() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.certSHA256
+}

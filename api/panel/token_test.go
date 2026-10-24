@@ -77,3 +77,22 @@ func TestRequestsIdentifyTheAgent(t *testing.T) {
 		t.Fatalf("features %q", req.Header.Get(FeaturesHeader))
 	}
 }
+
+// Once set, the certificate fingerprint goes with every request.
+func TestCertFingerprintIsSentOnceSet(t *testing.T) {
+	p := newFakePanel(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		_, _ = w.Write([]byte(`{"users":[]}`))
+	})
+	c := newTestClient(t, p.URL, "v1")
+	if _, err := c.GetUserList(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c.SetCertFingerprint("ab12")
+	if _, err := c.GetUserList(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reqs := p.Requests()
+	if reqs[0].Header.Get(CertFingerprintHeader) != "" || reqs[1].Header.Get(CertFingerprintHeader) != "ab12" {
+		t.Fatalf("headers %q %q", reqs[0].Header.Get(CertFingerprintHeader), reqs[1].Header.Get(CertFingerprintHeader))
+	}
+}

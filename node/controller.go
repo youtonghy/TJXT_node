@@ -137,6 +137,7 @@ func (c *Controller) ensureCert() bool {
 	}
 	c.certPending = false
 	c.resync = true
+	c.reportCertFingerprint()
 	return true
 }
 

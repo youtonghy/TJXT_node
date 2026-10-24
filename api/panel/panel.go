@@ -31,6 +31,9 @@ type Client struct {
 	nodeEtag         string
 	userEtag         string
 	responseBodyHash string
+	// certSHA256 is the hex SHA-256 of the node's TLS certificate, reported so
+	// clients can pin a self-signed one.
+	certSHA256 string
 	// learnedID is the panel's base_config.node_id seen when pairing by key.
 	// It is used for tags and logs only: requests keep identifying the node by
 	// its key, so a node moved to another id by the panel still works.
@@ -121,11 +124,18 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		params["node_id"] = strconv.Itoa(c.NodeID)
 	}
 	client.SetQueryParams(params)
-	return &Client{
+	p := &Client{
 		client:  client,
 		Token:   c.Key,
 		APIHost: c.APIHost,
 		NodeId:  c.NodeID,
 		mode:    parseProtocolMode(c.Protocol),
-	}, nil
+	}
+	client.OnBeforeRequest(func(_ *resty.Client, req *resty.Request) error {
+		if fingerprint := p.certFingerprint(); fingerprint != "" {
+			req.SetHeader(CertFingerprintHeader, fingerprint)
+		}
+		return nil
+	})
+	return p, nil
 }

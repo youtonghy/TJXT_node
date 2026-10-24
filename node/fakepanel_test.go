@@ -38,6 +38,8 @@ type fakePanel struct {
 	configFetches int
 	// revoked is sent as revoked_user_ids in push answers.
 	revoked []int
+	// certFingerprint is the last X-TJXT-Cert-SHA256 a node sent.
+	certFingerprint string
 }
 
 func newFakePanel(t *testing.T, protocol string, users []panel.UserInfo) *fakePanel {
@@ -64,6 +66,9 @@ func (p *fakePanel) serve(w http.ResponseWriter, r *http.Request) {
 	if p.down {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
+	}
+	if fingerprint := r.Header.Get(panel.CertFingerprintHeader); fingerprint != "" {
+		p.certFingerprint = fingerprint
 	}
 	switch r.URL.Path {
 	case "/api/v3/server":
@@ -110,6 +115,12 @@ func (p *fakePanel) serve(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (p *fakePanel) CertFingerprint() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.certFingerprint
 }
 
 func (p *fakePanel) setConfig(key string, value any) {

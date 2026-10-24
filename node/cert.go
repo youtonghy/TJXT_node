@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -13,8 +15,40 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/youtonghy/TJXT_node/api/panel"
 	"github.com/youtonghy/TJXT_node/common/file"
 )
+
+// certFingerprint is the hex SHA-256 of the first certificate in a PEM file.
+func certFingerprint(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", fmt.Errorf("no certificate in %s", path)
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// reportCertFingerprint tells the panel the fingerprint of this node's current TLS
+// certificate, so clients can pin a self-signed one; nodes without TLS report none.
+func (c *Controller) reportCertFingerprint() {
+	info := c.nodeInfo()
+	cert := info.Common.CertInfo
+	if info.Security != panel.Tls || cert == nil || cert.CertFile == "" {
+		c.apiClient.SetCertFingerprint("")
+		return
+	}
+	fingerprint, err := certFingerprint(cert.CertFile)
+	if err != nil {
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Reading the certificate fingerprint failed")
+		return
+	}
+	c.apiClient.SetCertFingerprint(fingerprint)
+}
 
 func (c *Controller) renewCertTask(_ context.Context) error {
 	l, err := NewLego(c.nodeInfo().Common.CertInfo)
@@ -27,6 +61,7 @@ func (c *Controller) renewCertTask(_ context.Context) error {
 		log.WithField("tag", c.tag).Info("renew cert error: ", err)
 		return nil
 	}
+	c.reportCertFingerprint()
 	return nil
 }
 

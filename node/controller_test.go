@@ -192,3 +192,26 @@ func TestInboundOnlyChangesReloadInPlace(t *testing.T) {
 		t.Fatal("a route change must restart the core")
 	}
 }
+
+// A TLS node reports the SHA-256 of its certificate so clients can pin a self-signed one.
+func TestTLSNodeReportsItsCertificateFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	p := newFakePanel(t, "vless", testUsers(1))
+	p.config["tls"] = 1
+	p.config["tls_settings"] = map[string]any{
+		"cert_mode":   "self",
+		"server_name": "node.test",
+		"cert_file":   filepath.Join(dir, "node.cer"),
+		"key_file":    filepath.Join(dir, "node.key"),
+	}
+	ctrl, _ := startTestController(t, p)
+	poll(t, ctrl)
+	fingerprint := p.CertFingerprint()
+	want, err := certFingerprint(filepath.Join(dir, "node.cer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint == "" || fingerprint != want || len(fingerprint) != 64 {
+		t.Fatalf("fingerprint %q, want %q", fingerprint, want)
+	}
+}
