@@ -121,8 +121,7 @@ func buildWireGuard(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourCon
 }
 
 func applyPanelStreamSettings(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
-	raw := strings.TrimSpace(string(nodeInfo.Common.StreamSettings))
-	if raw == "" || raw == "{}" || raw == "null" {
+	if panel.IsEmptyJSON(nodeInfo.Common.StreamSettings) {
 		return nil
 	}
 	var stream coreConf.StreamConfig
@@ -134,8 +133,7 @@ func applyPanelStreamSettings(nodeInfo *panel.NodeInfo, inbound *coreConf.Inboun
 }
 
 func applyPanelSniffing(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) {
-	raw := strings.TrimSpace(string(nodeInfo.Common.Sniffing))
-	if raw == "" || raw == "{}" || raw == "null" {
+	if panel.IsEmptyJSON(nodeInfo.Common.Sniffing) {
 		return
 	}
 	var sniff coreConf.SniffingConfig

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -60,9 +61,9 @@ type CommonNode struct {
 	//anytls
 	PaddingScheme []string `json:"padding_scheme,omitempty"`
 	//hysteria hysteria2
-	UpMbps   int    `json:"up_mbps"`
-	DownMbps int    `json:"down_mbps"`
-	Obfs     string `json:"obfs"`
+	UpMbps   FlexInt `json:"up_mbps"`
+	DownMbps FlexInt `json:"down_mbps"`
+	Obfs     string  `json:"obfs"`
 	// HopPorts are the Hysteria 2 port hopping ranges ("20000-30000,40000-41000");
 	// the node redirects them to ServerPort.
 	HopPorts                string   `json:"hop_ports"`
@@ -81,8 +82,10 @@ type BaseConfig struct {
 	PushInterval           any `json:"push_interval"`
 	PullInterval           any `json:"pull_interval"`
 	DeviceOnlineMinTraffic int `json:"device_online_min_traffic"`
-	// NodeID is sent only to a node authenticated with its own key; the
-	// fleet-wide token never gets it. The top-level "id" is not trusted.
+	// NodeID is the node the panel resolved from the key. The panel adds it to
+	// every config it serves for one node, whichever key was used; a config
+	// without it means the panel could not tell which node this is (see
+	// ErrNotPairingKey). The top-level "id" is not trusted.
 	NodeID               int `json:"node_id"`
 	NodeReportMinTraffic int `json:"node_report_min_traffic"`
 	// AllowPrivateEgress lets users reach private, loopback, link-local and
@@ -96,21 +99,23 @@ func (n *NodeInfo) AllowsPrivateEgress() bool {
 }
 
 type TlsSettings struct {
-	ServerName       string   `json:"server_name"`
-	ServerNames      []string `json:"server_names"`
-	Dest             string   `json:"dest"`
-	ServerPort       string   `json:"server_port"`
-	ShortId          string   `json:"short_id"`
-	ShortIds         []string `json:"short_ids"`
-	PrivateKey       string   `json:"private_key"`
-	Mldsa65Seed      string   `json:"mldsa65Seed"`
-	Xver             uint64   `json:"xver,string"`
-	CertMode         string   `json:"cert_mode"`
-	CertFile         string   `json:"cert_file"`
-	KeyFile          string   `json:"key_file"`
-	Provider         string   `json:"provider"`
-	DNSEnv           string   `json:"dns_env"`
-	RejectUnknownSni string   `json:"reject_unknown_sni"`
+	ServerName  string   `json:"server_name"`
+	ServerNames []string `json:"server_names"`
+	Dest        string   `json:"dest"`
+	// ServerPort is the REALITY target port, sent as a string or a number.
+	ServerPort  FlexString `json:"server_port"`
+	ShortId     string     `json:"short_id"`
+	ShortIds    []string   `json:"short_ids"`
+	PrivateKey  string     `json:"private_key"`
+	Mldsa65Seed string     `json:"mldsa65Seed"`
+	Xver        FlexInt    `json:"xver"`
+	CertMode    string     `json:"cert_mode"`
+	CertFile    string     `json:"cert_file"`
+	KeyFile     string     `json:"key_file"`
+	Provider    string     `json:"provider"`
+	// DNSEnv is "KEY=value,KEY2=value2" or a JSON object.
+	DNSEnv           EnvMap   `json:"dns_env"`
+	RejectUnknownSni FlexBool `json:"reject_unknown_sni"`
 }
 
 type CertInfo struct {
@@ -237,7 +242,7 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 		return nil, err
 	}
 	node := &NodeInfo{Id: id}
-	if len(cm.NetworkSettings) == 0 && len(cm.StreamSettings) > 0 {
+	if IsEmptyJSON(cm.NetworkSettings) && !IsEmptyJSON(cm.StreamSettings) {
 		cm.NetworkSettings = cm.StreamSettings
 	}
 	switch cm.Protocol {
@@ -256,6 +261,10 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 	default:
 		return nil, &NodeConfigError{fmt.Errorf("unsupport protocol: %s", cm.Protocol)}
 	}
+	certMode, err := resolveTLS(node, cm.TlsSettings.CertMode)
+	if err != nil {
+		return nil, &NodeConfigError{err}
+	}
 	node.Tag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, node.Id)
 	cf := cm.TlsSettings.CertFile
 	kf := cm.TlsSettings.KeyFile
@@ -265,23 +274,23 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 	if kf == "" {
 		kf = filepath.Join("/etc/tjxt-node/", cm.Protocol+strconv.Itoa(node.Id)+".key")
 	}
+	certDomain := cm.TlsSettings.PrimaryServerName()
+	if certDomain == "" {
+		certDomain = cm.Host
+	}
 	cm.CertInfo = &CertInfo{
-		CertMode:         cm.TlsSettings.CertMode,
+		CertMode:         certMode,
 		CertFile:         cf,
 		KeyFile:          kf,
 		Email:            "node@tjxt",
-		CertDomain:       cm.TlsSettings.PrimaryServerName(),
+		CertDomain:       certDomain,
 		DNSEnv:           make(map[string]string),
 		Provider:         cm.TlsSettings.Provider,
-		RejectUnknownSni: cm.TlsSettings.RejectUnknownSni == "1",
+		RejectUnknownSni: bool(cm.TlsSettings.RejectUnknownSni),
 	}
-	if cm.CertInfo.CertMode == "dns" && cm.TlsSettings.DNSEnv != "" {
-		envs := strings.Split(cm.TlsSettings.DNSEnv, ",")
-		for _, env := range envs {
-			kv := strings.SplitN(env, "=", 2)
-			if len(kv) == 2 {
-				cm.CertInfo.DNSEnv[kv[0]] = kv[1]
-			}
+	if certMode == "dns" {
+		for k, v := range cm.TlsSettings.DNSEnv {
+			cm.CertInfo.DNSEnv[k] = v
 		}
 	}
 	if cm.BaseConfig == nil {
@@ -293,8 +302,163 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 	return node, nil
 }
 
+// tlsOnlyProtocol reports whether a protocol is always served over TLS.
+func tlsOnlyProtocol(nodeType string) bool {
+	switch nodeType {
+	case "trojan", "anytls", "hysteria2", "tuic":
+		return true
+	default:
+		return false
+	}
+}
+
+// quicProtocol reports whether a protocol runs over QUIC, which has TLS built in:
+// neither REALITY nor TLS terminated in front of the node can serve it.
+func quicProtocol(nodeType string) bool {
+	return nodeType == "hysteria2" || nodeType == "tuic"
+}
+
+// resolveTLS fixes node.Security for protocols that only exist over TLS and
+// returns the certificate mode to use.
+//
+//   - trojan and anytls without TLS ("tls": 0) are served with TLS; REALITY
+//     ("tls": 2) is kept. hysteria2 and tuic always use TLS.
+//   - With TLS on, a TLS-only protocol without cert_mode gets a self-signed
+//     certificate ("self"); hysteria2 and tuic do so for "none" as well, since
+//     QUIC cannot be terminated in front of the node.
+//   - vless and vmess with TLS on need a cert_mode: an empty one is an error
+//     rather than silent plaintext. "none" stays allowed and serves plaintext,
+//     for TLS terminated in front of the node (a CDN or reverse proxy).
+func resolveTLS(node *NodeInfo, certMode string) (string, error) {
+	certMode = strings.ToLower(strings.TrimSpace(certMode))
+	if tlsOnlyProtocol(node.Type) && (node.Security == None || quicProtocol(node.Type)) {
+		node.Security = Tls
+	}
+	if node.Security != Tls {
+		return certMode, nil
+	}
+	switch {
+	case tlsOnlyProtocol(node.Type) && certMode == "":
+		return "self", nil
+	case quicProtocol(node.Type) && certMode == "none":
+		return "self", nil
+	case (node.Type == "vless" || node.Type == "vmess") && certMode == "":
+		return "", fmt.Errorf("%s has TLS on but no tls_settings.cert_mode; set self, file, http or dns, "+
+			"or none when TLS is terminated in front of the node", node.Type)
+	}
+	return certMode, nil
+}
+
+// IsEmptyJSON reports whether a raw panel value is missing, null or {}.
+func IsEmptyJSON(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return true
+	}
+	if s[0] != '{' {
+		return false
+	}
+	var object map[string]json.RawMessage
+	return json.Unmarshal(raw, &object) == nil && len(object) == 0
+}
+
+// FlexInt is a panel number. Panels may send numbers as JSON numbers or numeric
+// strings; "" and null are 0.
+type FlexInt int
+
+func (n *FlexInt) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	if s == "null" {
+		return nil
+	}
+	if unquoted, err := strconv.Unquote(s); err == nil {
+		s = strings.TrimSpace(unquoted)
+	}
+	if s == "" {
+		*n = 0
+		return nil
+	}
+	if v, err := strconv.Atoi(s); err == nil {
+		*n = FlexInt(v)
+		return nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || f != math.Trunc(f) || math.Abs(f) > math.MaxInt32 {
+		return fmt.Errorf("invalid number %s", data)
+	}
+	*n = FlexInt(f)
+	return nil
+}
+
+// FlexString is a panel value sent as a string or a number; null is "".
+type FlexString string
+
+func (s *FlexString) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "null" {
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		*s = FlexString(strings.TrimSpace(str))
+		return nil
+	}
+	if _, err := strconv.ParseFloat(raw, 64); err != nil {
+		return fmt.Errorf("invalid string or number %s", data)
+	}
+	*s = FlexString(raw)
+	return nil
+}
+
+// EnvMap is a set of environment variables, sent as "KEY=value,KEY2=value2" or
+// as a JSON object of strings, numbers or booleans; null and "" are empty.
+type EnvMap map[string]string
+
+func (m *EnvMap) UnmarshalJSON(data []byte) error {
+	raw := strings.TrimSpace(string(data))
+	if raw == "null" {
+		return nil
+	}
+	env := EnvMap{}
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		for _, pair := range strings.Split(str, ",") {
+			if strings.TrimSpace(pair) == "" {
+				continue
+			}
+			k, v, ok := strings.Cut(pair, "=")
+			k = strings.TrimSpace(k)
+			if !ok || k == "" {
+				return fmt.Errorf("invalid environment entry %q, want KEY=value", pair)
+			}
+			env[k] = strings.TrimSpace(v)
+		}
+		*m = env
+		return nil
+	}
+	var object map[string]any
+	if err := json.Unmarshal(data, &object); err != nil {
+		return fmt.Errorf("invalid environment %s: want \"KEY=value,...\" or an object", data)
+	}
+	for k, v := range object {
+		switch v := v.(type) {
+		case string:
+			env[k] = v
+		case float64, bool:
+			env[k] = fmt.Sprint(v)
+		case nil:
+			env[k] = ""
+		default:
+			return fmt.Errorf("invalid environment value for %s: want a string", k)
+		}
+	}
+	*m = env
+	return nil
+}
+
 // FlexBool is a panel switch. Panels store switches as 0/1, so it accepts
-// JSON booleans, numbers (non-zero is true), "0"/"1"/"true"/"false" and null.
+// JSON booleans, numbers (non-zero is true), "0"/"1"/"true"/"false", "" and
+// null (both false).
 type FlexBool bool
 
 func (b *FlexBool) UnmarshalJSON(data []byte) error {
@@ -304,6 +468,10 @@ func (b *FlexBool) UnmarshalJSON(data []byte) error {
 	}
 	if unquoted, err := strconv.Unquote(s); err == nil {
 		s = strings.TrimSpace(unquoted)
+	}
+	if s == "" {
+		*b = false
+		return nil
 	}
 	if v, err := strconv.ParseBool(s); err == nil {
 		*b = FlexBool(v)

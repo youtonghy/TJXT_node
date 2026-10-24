@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"time"
 
@@ -108,23 +109,32 @@ func (c *Controller) requestCert() error {
 	return nil
 }
 
+// generateSelfSslCertificate writes a self-signed certificate for domain, which
+// is the TLS server name, else the node host (see panel.CertInfo.CertDomain).
+// An IP address goes into the IP SANs; without any name the certificate has
+// none: clients pin a self-signed certificate by fingerprint, not by name.
 func generateSelfSslCertificate(domain, certPath, keyPath string) error {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("generate key: %w", err)
 	}
 	tmpl := &x509.Certificate{
-		Version:      3,
-		SerialNumber: big.NewInt(time.Now().Unix()),
-		Subject: pkix.Name{
-			CommonName: domain,
-		},
-		DNSNames:              []string{domain},
+		Version:               3,
+		SerialNumber:          big.NewInt(time.Now().Unix()),
+		Subject:               pkix.Name{CommonName: domain},
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().AddDate(30, 0, 0),
+	}
+	switch ip := net.ParseIP(domain); {
+	case ip != nil:
+		tmpl.IPAddresses = []net.IP{ip}
+	case domain != "":
+		tmpl.DNSNames = []string{domain}
+	default:
+		tmpl.Subject.CommonName = "tjxt-node"
 	}
 	cert, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 	if err != nil {
