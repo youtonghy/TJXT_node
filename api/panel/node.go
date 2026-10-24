@@ -60,9 +60,12 @@ type CommonNode struct {
 	//anytls
 	PaddingScheme []string `json:"padding_scheme,omitempty"`
 	//hysteria hysteria2
-	UpMbps                  int    `json:"up_mbps"`
-	DownMbps                int    `json:"down_mbps"`
-	Obfs                    string `json:"obfs"`
+	UpMbps   int    `json:"up_mbps"`
+	DownMbps int    `json:"down_mbps"`
+	Obfs     string `json:"obfs"`
+	// HopPorts are the Hysteria 2 port hopping ranges ("20000-30000,40000-41000");
+	// the node redirects them to ServerPort.
+	HopPorts                string `json:"hop_ports"`
 	ObfsPassword            string `json:"obfs_password"`
 	Ignore_Client_Bandwidth bool   `json:"ignore_client_bandwidth"`
 }

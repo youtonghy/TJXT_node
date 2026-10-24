@@ -646,7 +646,8 @@ wants_source_build() {
 }
 
 install_download_deps() {
-  local pkgs=(curl ca-certificates)
+  # nftables lets Hysteria 2 nodes redirect their port hopping range (optional).
+  local pkgs=(curl ca-certificates nftables)
   [[ -n "${GITHUB_TOKEN:-}" ]] && pkgs+=(jq)
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update -y

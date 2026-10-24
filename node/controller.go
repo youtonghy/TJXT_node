@@ -48,6 +48,8 @@ type Controller struct {
 	revoked map[int]bool
 	// infoMu guards info for the tasks that read it while a poll replaces it.
 	infoMu sync.RWMutex
+	// portHopApplied is set while the node's port hopping redirect may exist.
+	portHopApplied bool
 }
 
 // nodeInfo returns the node config currently applied.
@@ -325,6 +327,7 @@ func (c *Controller) applyUserDiff(desired, deleted, added []panel.UserInfo) err
 		if err := c.server.DelNode(c.tag); err != nil {
 			return fmt.Errorf("stop inbound error: %s", err)
 		}
+		c.syncPortHop(false)
 		if running {
 			log.WithField("tag", c.tag).Info("Stopped inbound because user list is empty")
 		} else {
@@ -339,6 +342,7 @@ func (c *Controller) applyUserDiff(desired, deleted, added []panel.UserInfo) err
 		if err := c.server.AddNode(c.tag, c.info, desired); err != nil {
 			return fmt.Errorf("add new node error: %s", err)
 		}
+		c.syncPortHop(true)
 		added = desired
 	}
 	if len(added) == 0 {
@@ -374,5 +378,6 @@ func (c *Controller) stopRuntime() error {
 	if c.server == nil || c.info == nil {
 		return nil
 	}
+	c.syncPortHop(false)
 	return c.server.DelNode(c.tag)
 }
