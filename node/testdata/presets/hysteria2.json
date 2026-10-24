@@ -1,0 +1,42 @@
+{
+  "base_config": {
+    "allow_private_egress": false,
+    "device_online_min_traffic": 0,
+    "node_id": 5,
+    "node_report_min_traffic": 0,
+    "pull_interval": 60,
+    "push_interval": 60
+  },
+  "encryption_settings": {},
+  "group_id": 1,
+  "host": "hysteria2.example.com",
+  "id": 5,
+  "listen_ip": "0.0.0.0",
+  "name": "Preset hysteria2",
+  "network": "tcp",
+  "network_settings": {},
+  "obfs": "salamander",
+  "obfs_password": "6e89b528be4145389036eb32",
+  "port": 443,
+  "protocol": "hysteria2",
+  "rate": 1.0,
+  "route_ids": [],
+  "routes": [],
+  "server_port": 443,
+  "settings": {},
+  "sniffing": {},
+  "streamSettings": {},
+  "tls": 1,
+  "tls_settings": {
+    "allow_insecure": true,
+    "alpn": [
+      "h3"
+    ],
+    "cert_mode": "self",
+    "dest": "cover.example",
+    "server_name": "hysteria2.example.com",
+    "server_names": [
+      "cover.example"
+    ]
+  }
+}

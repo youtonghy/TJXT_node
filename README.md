@@ -104,6 +104,16 @@ sudo tjxt-node-deploy update
 
 Push a `v*` tag. `.github/workflows/release.yml` runs vet and race tests, builds `tjxt-node-linux-{amd64,arm64}`, and publishes them with `deploy.sh` and `SHA256SUMS`.
 
+## Upgrading Xray
+
+Xray comes from the `youtonghy/xray-core` fork (`replace` in `go.mod`). On each upgrade:
+
+1. Merge only a **stable** upstream release tag into the fork. Upstream ships many pre-releases without notes and has withdrawn releases (v26.10.10 and v26.10.17 bundled compromised root CAs); never track them.
+2. Keep the REALITY pin (`github.com/xtls/reality` at `e1986a4d31ca`, before X25519MLKEM768 became mandatory) until sing-box sends an X25519MLKEM768 key share (sing-box issue #4520); mihomo already does with `support-x25519mlkem768`, which the panel sets. Drop the pin only after the Docker E2E passes with the sing-box REALITY client.
+3. Point `go.mod` at the new fork commit, then run `gofmt -l`, `go vet ./...` and `go test -race -count=1 ./...`. `TestPanelPresetsStartXray` starts every panel preset (`node/testdata/presets`, regenerated from TONG-ladder) with the new core; a failure means the release changed a config the panel produces.
+4. Run TONG-ladder's `python3 scripts/docker_node_e2e.py` with `TJXT_NODE_ROOT` pointing here: real clients through every protocol and route action.
+5. Read the release notes for removed or renamed config fields (e.g. `allowInsecure` became an error in 26.x) and adjust the panel's subscriptions in the same task.
+
 ## Build
 
 ```bash
