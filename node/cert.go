@@ -17,7 +17,7 @@ import (
 )
 
 func (c *Controller) renewCertTask(_ context.Context) error {
-	l, err := NewLego(c.info.Common.CertInfo)
+	l, err := NewLego(c.nodeInfo().Common.CertInfo)
 	if err != nil {
 		log.WithField("tag", c.tag).Info("new lego error: ", err)
 		return nil
@@ -31,7 +31,7 @@ func (c *Controller) renewCertTask(_ context.Context) error {
 }
 
 func (c *Controller) requestCert() error {
-	cert := c.info.Common.CertInfo
+	cert := c.nodeInfo().Common.CertInfo
 	switch cert.CertMode {
 	case "none", "":
 	case "file":

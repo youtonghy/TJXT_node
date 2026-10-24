@@ -160,3 +160,35 @@ func TestCertFailureKeepsOnlyThisNodeDownUntilAPollFixesIt(t *testing.T) {
 		t.Fatalf("after the fix: running=%v certPending=%v", inboundRunning(ctrl), ctrl.certPending)
 	}
 }
+
+// A change of only this node's inbound rebuilds that inbound in place; a change of
+// what the shared core is built from (here the routes) still restarts the core.
+func TestInboundOnlyChangesReloadInPlace(t *testing.T) {
+	p := newFakePanel(t, "vless", testUsers(1))
+	ctrl, x := startTestController(t, p)
+	if !inboundRunning(ctrl) {
+		t.Fatal("inbound not running")
+	}
+	oldPort := ctrl.info.Common.ServerPort
+	p.setConfig("server_port", freePort(t))
+	poll(t, ctrl)
+	select {
+	case <-x.ReloadCh:
+		t.Fatal("an inbound-only change restarted the core")
+	default:
+	}
+	if ctrl.info.Common.ServerPort == oldPort || !inboundRunning(ctrl) {
+		t.Fatalf("inbound not rebuilt on the new port %d", ctrl.info.Common.ServerPort)
+	}
+	if len(ctrl.userList) != 1 {
+		t.Fatalf("users not restored: %+v", ctrl.userList)
+	}
+
+	p.setConfig("routes", []map[string]any{{"id": 1, "match": []string{"example.com"}, "action": "block"}})
+	poll(t, ctrl)
+	select {
+	case <-x.ReloadCh:
+	default:
+		t.Fatal("a route change must restart the core")
+	}
+}

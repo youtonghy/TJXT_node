@@ -11,8 +11,8 @@ import (
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	var devicemin = 0
-	if c.info.Common.BaseConfig != nil {
-		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
+	if info := c.nodeInfo(); info.Common.BaseConfig != nil {
+		devicemin = info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
 	if err := c.reportSpool(ctx); err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Reporting spooled traffic failed, it is kept and retried")
@@ -74,8 +74,8 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 }
 
 func (c *Controller) reportMinTraffic() int {
-	if c.info != nil && c.info.Common != nil && c.info.Common.BaseConfig != nil {
-		return c.info.Common.BaseConfig.NodeReportMinTraffic
+	if info := c.nodeInfo(); info != nil && info.Common != nil && info.Common.BaseConfig != nil {
+		return info.Common.BaseConfig.NodeReportMinTraffic
 	}
 	return 0
 }

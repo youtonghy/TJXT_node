@@ -114,8 +114,10 @@ func New(nodes []conf.NodeConfig, prev *Node) (*Node, error) {
 // current config as new on the first poll.
 func (n *Node) Rebuild() (*Node, error) {
 	again := &Node{
-		Configs:   append([]conf.NodeConfig(nil), n.Configs...),
-		NodeInfos: append([]*panel.NodeInfo(nil), n.NodeInfos...),
+		Configs: append([]conf.NodeConfig(nil), n.Configs...),
+	}
+	for i := range n.Configs {
+		again.NodeInfos = append(again.NodeInfos, n.currentInfo(i))
 	}
 	clients := make([]*panel.Client, len(again.Configs))
 	for i := range again.Configs {
@@ -243,10 +245,21 @@ func (n *Node) runningInfo(nc conf.NodeConfig) *panel.NodeInfo {
 	}
 	for i := range n.Configs {
 		if sameNode(n.Configs[i], nc) {
-			return n.NodeInfos[i]
+			return n.currentInfo(i)
 		}
 	}
 	return nil
+}
+
+// currentInfo is the config node i runs now: a controller may have applied a newer
+// one in place since this generation started.
+func (n *Node) currentInfo(i int) *panel.NodeInfo {
+	if i < len(n.controllers) && n.controllers[i] != nil {
+		if info := n.controllers[i].nodeInfo(); info != nil {
+			return info
+		}
+	}
+	return n.NodeInfos[i]
 }
 
 func sameNode(a, b conf.NodeConfig) bool {

@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"time"
 
@@ -45,6 +46,15 @@ type Controller struct {
 	usersMu sync.Mutex
 	// revoked users stay removed until the panel sends a changed user list.
 	revoked map[int]bool
+	// infoMu guards info for the tasks that read it while a poll replaces it.
+	infoMu sync.RWMutex
+}
+
+// nodeInfo returns the node config currently applied.
+func (c *Controller) nodeInfo() *panel.NodeInfo {
+	c.infoMu.RLock()
+	defer c.infoMu.RUnlock()
+	return c.info
 }
 
 // NewController return a Node controller with default parameters.
@@ -204,6 +214,38 @@ func (c *Controller) spoolRemaining(reason string, reportErr error) {
 		return
 	}
 	log.WithFields(fields).Warn("Traffic report failed, kept on disk and reported on the next push")
+}
+
+// reloadsInPlace reports whether moving from old to new changes only this node's
+// inbound (protocol, transport, TLS/REALITY, port, ...), which the controller can
+// rebuild alone. Routes, private egress and the rest of the base config shape the
+// shared Xray router and outbounds, and the tag and intervals the tasks, so those
+// changes still restart the core.
+func reloadsInPlace(old, new *panel.NodeInfo) bool {
+	if old == nil || new == nil || old.Common == nil || new.Common == nil {
+		return false
+	}
+	return old.Id == new.Id && old.Type == new.Type && old.Tag == new.Tag &&
+		old.PushInterval == new.PushInterval && old.PullInterval == new.PullInterval &&
+		reflect.DeepEqual(old.Common.Routes, new.Common.Routes) &&
+		reflect.DeepEqual(old.Common.BaseConfig, new.Common.BaseConfig)
+}
+
+// reloadInbound applies a new config of this node by rebuilding only its inbound;
+// the other nodes keep their connections. The next sync of this poll brings the
+// inbound back with the current users. Traffic counters are per tag and survive.
+func (c *Controller) reloadInbound(info *panel.NodeInfo) {
+	c.usersMu.Lock()
+	defer c.usersMu.Unlock()
+	certChanged := !reflect.DeepEqual(c.info.Common.CertInfo, info.Common.CertInfo)
+	c.infoMu.Lock()
+	c.info = info
+	c.infoMu.Unlock()
+	if info.Security == panel.Tls && certChanged {
+		c.certPending = true
+	}
+	c.resetRuntime()
+	log.WithField("tag", c.tag).Info("Node config changed, rebuilding this inbound only")
 }
 
 // takeRevoked returns and clears the users revoked by push answers.

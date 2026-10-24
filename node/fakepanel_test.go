@@ -112,6 +112,12 @@ func (p *fakePanel) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (p *fakePanel) setConfig(key string, value any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.config[key] = value
+}
+
 func (p *fakePanel) setRevoked(ids []int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

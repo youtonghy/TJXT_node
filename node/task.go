@@ -38,7 +38,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	cancel()
 	c.startTask(c.userReportPeriodic, false)
 	if node.Security == panel.Tls {
-		switch c.info.Common.CertInfo.CertMode {
+		switch c.nodeInfo().Common.CertInfo.CertMode {
 		case "none", "", "file", "self":
 		default:
 			c.renewCertPeriodic = &task.Task{
@@ -72,7 +72,9 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		}).Error("Get node info failed")
 		return nil
 	}
-	if newN != nil {
+	if newN != nil && reloadsInPlace(c.nodeInfo(), newN) {
+		c.reloadInbound(newN)
+	} else if newN != nil {
 		log.WithField("tag", c.tag).Info("Got new node info, reload")
 		if c.server.ReloadCh != nil {
 			select {
