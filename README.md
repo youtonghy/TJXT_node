@@ -102,7 +102,7 @@ sudo tjxt-node-deploy update
 
 ## Release
 
-Push a `v*` tag. `.github/workflows/release.yml` runs vet and race tests, builds `tjxt-node-linux-{amd64,arm64}`, and publishes them with `deploy.sh` and `SHA256SUMS`.
+Push a `v*` tag, or run the Release workflow manually (Actions → Release → Run workflow) with a version such as `v0.1.0`; the manual run creates that tag on the selected branch's commit. `.github/workflows/release.yml` runs vet and race tests, builds `tjxt-node-linux-{amd64,arm64}`, and publishes them with `deploy.sh` and `SHA256SUMS`.
 
 ## Upgrading Xray
 
