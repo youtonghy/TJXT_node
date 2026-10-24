@@ -106,10 +106,13 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	case "trojan":
 		users = buildTrojanUsers(p.Tag, p.Users)
 	case "shadowsocks":
-		users = buildSSUsers(p.Tag,
+		users, err = buildSSUsers(p.Tag,
 			p.Users,
 			p.Common.Cipher,
 			p.Common.ServerKey)
+		if err != nil {
+			return 0, err
+		}
 	case "hysteria2":
 		users = buildHysteria2Users(p.Tag, p.Users)
 	case "tuic":
@@ -197,40 +200,87 @@ func buildTrojanUser(tag string, userInfo *panel.UserInfo) (user *protocol.User)
 	}
 }
 
-func buildSSUsers(tag string, userInfo []panel.UserInfo, cypher string, serverKey string) (users []*protocol.User) {
-	users = make([]*protocol.User, len(userInfo))
-	for i := range userInfo {
-		users[i] = buildSSUser(tag, &userInfo[i], cypher, serverKey)
+func buildSSUsers(tag string, userInfo []panel.UserInfo, cypher string, serverKey string) ([]*protocol.User, error) {
+	method, err := ssMethod(cypher, serverKey)
+	if err != nil {
+		return nil, err
 	}
-	return users
+	users := make([]*protocol.User, len(userInfo))
+	for i := range userInfo {
+		if users[i], err = buildSSUser(tag, &userInfo[i], method); err != nil {
+			return nil, err
+		}
+	}
+	return users, nil
 }
 
-func buildSSUser(tag string, userInfo *panel.UserInfo, cypher string, serverKey string) (user *protocol.User) {
-	if serverKey == "" {
+func buildSSUser(tag string, userInfo *panel.UserInfo, method ssCipher) (*protocol.User, error) {
+	if !method.is2022 {
 		ssAccount := &shadowsocks.Account{
 			Password:   userInfo.Uuid,
-			CipherType: getCipherFromString(cypher),
+			CipherType: method.legacy,
 		}
 		return &protocol.User{
 			Level:   0,
 			Email:   format.UserTag(tag, userInfo.Uuid),
 			Account: serial.ToTypedMessage(ssAccount),
-		}
-	} else {
-		keyLength := ss2022KeyLen(cypher)
-		ssAccount := &shadowsocks_2022.Account{
-			Key: base64.StdEncoding.EncodeToString([]byte(userInfo.Uuid[:keyLength])),
-		}
-		return &protocol.User{
-			Level:   0,
-			Email:   format.UserTag(tag, userInfo.Uuid),
-			Account: serial.ToTypedMessage(ssAccount),
-		}
+		}, nil
 	}
+	if len(userInfo.Uuid) < method.keyLen {
+		return nil, fmt.Errorf("user %d: uuid is shorter than the %d-byte %s key", userInfo.Id, method.keyLen, method.name)
+	}
+	ssAccount := &shadowsocks_2022.Account{
+		Key: base64.StdEncoding.EncodeToString([]byte(userInfo.Uuid[:method.keyLen])),
+	}
+	return &protocol.User{
+		Level:   0,
+		Email:   format.UserTag(tag, userInfo.Uuid),
+		Account: serial.ToTypedMessage(ssAccount),
+	}, nil
 }
 
-// ss2022KeyLen is the key length of a Shadowsocks 2022 cipher (32 for unknown
-// ones, the longest, so slicing a 32-byte buffer stays in range).
+// SupportedShadowsocksCiphers are the Shadowsocks methods a node serves. The
+// 2022 methods need the panel's server_key. 2022-blake3-chacha20-poly1305 is
+// missing: Xray serves it to a single user only, and a node serves many.
+var SupportedShadowsocksCiphers = []string{
+	"aes-128-gcm",
+	"aes-256-gcm",
+	"chacha20-poly1305", "chacha20-ietf-poly1305",
+	"xchacha20-poly1305", "xchacha20-ietf-poly1305",
+	"2022-blake3-aes-128-gcm",
+	"2022-blake3-aes-256-gcm",
+}
+
+// ssCipher is a Shadowsocks method the node serves.
+type ssCipher struct {
+	name   string // lower-case method name
+	is2022 bool
+	keyLen int                    // 2022: user and server key length
+	legacy shadowsocks.CipherType // classic AEAD methods
+}
+
+// ssMethod resolves the panel's cipher. Unsupported ciphers and 2022 methods
+// without a server key are errors, so the inbound is not built rather than
+// built with users Xray cannot serve.
+func ssMethod(cipher, serverKey string) (ssCipher, error) {
+	name := strings.ToLower(strings.TrimSpace(cipher))
+	switch name {
+	case "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm":
+		if serverKey == "" {
+			return ssCipher{}, fmt.Errorf("shadowsocks %s needs server_key from the panel", name)
+		}
+		return ssCipher{name: name, is2022: true, keyLen: ss2022KeyLen(name)}, nil
+	case "2022-blake3-chacha20-poly1305":
+		return ssCipher{}, fmt.Errorf("shadowsocks %s serves a single user only; use 2022-blake3-aes-128-gcm or 2022-blake3-aes-256-gcm", name)
+	}
+	if t := getCipherFromString(name); t != shadowsocks.CipherType_UNKNOWN {
+		return ssCipher{name: name, legacy: t}, nil
+	}
+	return ssCipher{}, fmt.Errorf("unsupported shadowsocks cipher %q; use one of: %s",
+		cipher, strings.Join(SupportedShadowsocksCiphers, ", "))
+}
+
+// ss2022KeyLen is the key length of a Shadowsocks 2022 cipher.
 func ss2022KeyLen(cipher string) int {
 	if strings.EqualFold(cipher, "2022-blake3-aes-128-gcm") {
 		return 16
@@ -246,6 +296,8 @@ func getCipherFromString(c string) shadowsocks.CipherType {
 		return shadowsocks.CipherType_AES_256_GCM
 	case "chacha20-poly1305", "aead_chacha20_poly1305", "chacha20-ietf-poly1305":
 		return shadowsocks.CipherType_CHACHA20_POLY1305
+	case "xchacha20-poly1305", "aead_xchacha20_poly1305", "xchacha20-ietf-poly1305":
+		return shadowsocks.CipherType_XCHACHA20_POLY1305
 	default:
 		return shadowsocks.CipherType_UNKNOWN
 	}

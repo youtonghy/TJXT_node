@@ -319,20 +319,23 @@ type ShadowsocksHTTPNetworkSettings struct {
 func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	inbound.Protocol = "shadowsocks"
 	s := nodeInfo.Common
+	method, err := ssMethod(s.Cipher, s.ServerKey)
+	if err != nil {
+		return err
+	}
 	settings := &coreConf.ShadowsocksServerConfig{
-		Cipher: s.Cipher,
+		Cipher: method.name,
 	}
 	p := make([]byte, 32)
-	_, err := rand.Read(p)
-	if err != nil {
+	if _, err := rand.Read(p); err != nil {
 		return fmt.Errorf("generate random password error: %s", err)
 	}
 	randomPasswd := hex.EncodeToString(p)
-	cipher := s.Cipher
-	if s.ServerKey != "" {
+	cipher := method.name
+	if method.is2022 {
 		settings.Password = s.ServerKey
 		// Shadowsocks 2022 user keys must have the cipher's key length.
-		randomPasswd = base64.StdEncoding.EncodeToString(p[:ss2022KeyLen(s.Cipher)])
+		randomPasswd = base64.StdEncoding.EncodeToString(p[:method.keyLen])
 		cipher = ""
 	}
 	defaultSSuser := &coreConf.ShadowsocksUserConfig{

@@ -84,3 +84,40 @@ func TestVLessEncryptionNoneIsNoDecryption(t *testing.T) {
 		t.Fatal("expected an error for an unknown encryption")
 	}
 }
+
+func TestShadowsocksCiphers(t *testing.T) {
+	const key16 = "L8dsfbeHPFvIGfC9zOUbKA=="
+	const key32 = "cdLSHTnnySASHCyTPm32WxiUpuVbtizNhrCYi4NdQuk="
+	users := []panel.UserInfo{{Id: 1, Uuid: "00000000-0000-4000-8000-000000000001"}}
+	for _, tc := range []struct{ cipher, key string }{
+		{"aes-128-gcm", ""}, {"aes-256-gcm", ""}, {"AES-256-GCM", ""},
+		{"chacha20-poly1305", ""}, {"chacha20-ietf-poly1305", ""},
+		{"xchacha20-poly1305", ""}, {"xchacha20-ietf-poly1305", ""},
+		{"2022-blake3-aes-128-gcm", key16}, {"2022-blake3-aes-256-gcm", key32},
+		// A server key sent with a classic cipher is not used.
+		{"aes-128-gcm", key16},
+	} {
+		raw := `{"protocol":"shadowsocks","cipher":"` + tc.cipher + `","server_key":"` + tc.key + `"}`
+		if _, err := buildInbound(testNode(t, raw), "test", nil); err != nil {
+			t.Fatalf("%s: %v", tc.cipher, err)
+		}
+		if _, err := buildSSUsers("test", users, tc.cipher, tc.key); err != nil {
+			t.Fatalf("%s users: %v", tc.cipher, err)
+		}
+	}
+	for _, tc := range []struct{ cipher, key, errText string }{
+		{"aes-192-gcm", "", "unsupported"},
+		{"none", "", "unsupported"},
+		{"", "", "unsupported"},
+		{"2022-blake3-chacha20-poly1305", key32, "single user"},
+		{"2022-blake3-aes-128-gcm", "", "server_key"},
+	} {
+		raw := `{"protocol":"shadowsocks","cipher":"` + tc.cipher + `","server_key":"` + tc.key + `"}`
+		if _, err := buildInbound(testNode(t, raw), "test", nil); err == nil || !strings.Contains(err.Error(), tc.errText) {
+			t.Fatalf("%q: expected an error about %s, got %v", tc.cipher, tc.errText, err)
+		}
+		if _, err := buildSSUsers("test", users, tc.cipher, tc.key); err == nil {
+			t.Fatalf("%q users: expected an error", tc.cipher)
+		}
+	}
+}
