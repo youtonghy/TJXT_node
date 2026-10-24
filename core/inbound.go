@@ -496,7 +496,7 @@ func buildTuic(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) 
 	s := nodeInfo.Common
 	settings := &coreConf.TuicServerConfig{
 		CongestionControl: s.CongestionControl,
-		ZeroRttHandshake:  s.ZeroRTTHandshake,
+		ZeroRttHandshake:  bool(s.ZeroRTTHandshake),
 	}
 	t := coreConf.TransportProtocol("tuic")
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}

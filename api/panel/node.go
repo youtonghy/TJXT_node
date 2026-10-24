@@ -55,8 +55,8 @@ type CommonNode struct {
 	Cipher    string `json:"cipher"`
 	ServerKey string `json:"server_key"`
 	//tuic
-	CongestionControl string `json:"congestion_control"`
-	ZeroRTTHandshake  bool   `json:"zero_rtt_handshake"`
+	CongestionControl string   `json:"congestion_control"`
+	ZeroRTTHandshake  FlexBool `json:"zero_rtt_handshake"`
 	//anytls
 	PaddingScheme []string `json:"padding_scheme,omitempty"`
 	//hysteria hysteria2
@@ -65,9 +65,9 @@ type CommonNode struct {
 	Obfs     string `json:"obfs"`
 	// HopPorts are the Hysteria 2 port hopping ranges ("20000-30000,40000-41000");
 	// the node redirects them to ServerPort.
-	HopPorts                string `json:"hop_ports"`
-	ObfsPassword            string `json:"obfs_password"`
-	Ignore_Client_Bandwidth bool   `json:"ignore_client_bandwidth"`
+	HopPorts                string   `json:"hop_ports"`
+	ObfsPassword            string   `json:"obfs_password"`
+	Ignore_Client_Bandwidth FlexBool `json:"ignore_client_bandwidth"`
 }
 
 type Route struct {
@@ -277,6 +277,30 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 	node.PullInterval = intervalToTime(cm.BaseConfig.PullInterval)
 	node.Common = cm
 	return node, nil
+}
+
+// FlexBool is a panel switch. Panels store switches as 0/1, so it accepts
+// JSON booleans, numbers (non-zero is true), "0"/"1"/"true"/"false" and null.
+type FlexBool bool
+
+func (b *FlexBool) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	if s == "null" {
+		return nil
+	}
+	if unquoted, err := strconv.Unquote(s); err == nil {
+		s = strings.TrimSpace(unquoted)
+	}
+	if v, err := strconv.ParseBool(s); err == nil {
+		*b = FlexBool(v)
+		return nil
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return fmt.Errorf("invalid switch value %s", data)
+	}
+	*b = f != 0
+	return nil
 }
 
 const defaultInterval = 60 * time.Second
