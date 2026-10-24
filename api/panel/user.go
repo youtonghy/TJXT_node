@@ -49,8 +49,10 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	return c.getUserListV1(ctx)
 }
 
-// userPageSize is the page size asked for when a panel answers with only part of
-// the list (a non-null next_cursor). Current panels send the whole list.
+// userPageSize is the user list page size. v3 asks for it from the first page:
+// the panel's v3 gateway refuses responses over 1 MiB, which a whole list of a
+// large node exceeds. v1 asks for it once a panel answers with only part of the
+// list (a non-null next_cursor).
 const userPageSize = 500
 
 // maxUserPages bounds the pages read for one list so a panel that keeps returning
@@ -58,7 +60,9 @@ const userPageSize = 500
 const maxUserPages = 10_000
 
 func (c *Client) getUserListV3(ctx context.Context) ([]UserInfo, error) {
-	r, body, err := c.callV3(ctx, "GET", "server/UniProxy/user", identityParams(c), c.getUserEtag())
+	params := identityParams(c)
+	params["limit"] = userPageSize
+	r, body, err := c.callV3(ctx, "GET", "server/UniProxy/user", params, c.getUserEtag())
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +77,7 @@ func (c *Client) getUserListV3(ctx context.Context) ([]UserInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setUserEtag(r.Header().Get("ETag"))
+	c.setUserEtag(listEtag(r.Header().Get("ETag"), page))
 	return users, nil
 }
 
@@ -90,6 +94,16 @@ func (c *Client) getUserPageV3(ctx context.Context, afterID int64) (userListPage
 		return userListPage{}, fmt.Errorf("decode v3 user page: %w", err)
 	}
 	return page, nil
+}
+
+// listEtag is the ETag to send with the next list request. The panel's ETag
+// covers only the page it answers, so it stands for the whole list only when
+// the first page is the whole list; a paged list is fetched in full every time.
+func listEtag(etag string, first userListPage) string {
+	if first.NextCursor != nil {
+		return ""
+	}
+	return etag
 }
 
 // readRemainingUsers appends the pages after first while the panel returns a
@@ -146,7 +160,7 @@ func (c *Client) getUserListV1(ctx context.Context) ([]UserInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.setUserEtag(r.Header().Get("ETag"))
+	c.setUserEtag(listEtag(r.Header().Get("ETag"), page))
 	return users, nil
 }
 
@@ -421,12 +435,15 @@ func (c *Client) reportTrafficPart(ctx context.Context, batchID string, userTraf
 	return decodePushResult(r.Body())
 }
 
+// ReportNodeOnlineUsers reports the online IPs per user. The panel replaces the
+// node's previous report, so an empty (or nil) map clears it.
 func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
+	if data == nil || *data == nil {
+		data = &map[int][]string{}
+	}
 	if c.v3Available() {
 		params := identityParams(c)
-		if data != nil {
-			params["users"] = *data
-		}
+		params["users"] = *data
 		_, _, err := c.callV3(ctx, "POST", "server/UniProxy/alive", params, "")
 		if err == nil || !errors.Is(err, errV3Unsupported) {
 			return err

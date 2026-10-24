@@ -184,3 +184,52 @@ func TestGetUserListRejectsStuckCursor(t *testing.T) {
 		t.Fatal("a cursor that does not advance must be an error")
 	}
 }
+
+// v3 asks for pages from the first request (the gateway refuses responses over
+// 1 MiB). The panel's ETag covers one page, so it is reused only for a list
+// that fits in one page.
+func TestGetUserListV3PagesAndEtag(t *testing.T) {
+	paged := true
+	p := newFakePanel(t, func(w http.ResponseWriter, r *http.Request, body []byte) {
+		var call struct {
+			Params map[string]any `json:"params"`
+		}
+		if err := json.Unmarshal(body, &call); err != nil {
+			t.Errorf("decode gateway call: %v", err)
+		}
+		if fmt.Sprint(call.Params["limit"]) != "500" {
+			t.Errorf("v3 user request without limit=500: %s", body)
+		}
+		if r.Header.Get("If-None-Match") == `"first"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"first"`)
+		page := `{"users":[{"id":1}],"next_cursor":null}`
+		if _, ok := call.Params["after_id"]; ok {
+			page = `{"users":[{"id":2}],"next_cursor":null}`
+		} else if paged {
+			page = `{"users":[{"id":1}],"next_cursor":1}`
+		}
+		_, _ = w.Write([]byte(`{"code":200,"data":` + page + `}`))
+	})
+	c := newTestClient(t, p.URL, "v3")
+	for i := 0; i < 2; i++ {
+		users, err := c.GetUserList(context.Background())
+		if err != nil || len(users) != 2 {
+			t.Fatalf("paged list, poll %d: %+v, %v", i, users, err)
+		}
+	}
+	paged = false
+	if users, err := c.GetUserList(context.Background()); err != nil || len(users) != 1 {
+		t.Fatalf("single-page list: %+v, %v", users, err)
+	}
+	if users, err := c.GetUserList(context.Background()); err != nil || users != nil {
+		t.Fatalf("unchanged single-page list must be 304: %+v, %v", users, err)
+	}
+	for i, req := range p.Requests()[:4] {
+		if req.Header.Get("If-None-Match") != "" {
+			t.Fatalf("request %d of a paged list sent If-None-Match", i)
+		}
+	}
+}

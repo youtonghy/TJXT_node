@@ -216,3 +216,18 @@ func TestRevokedUsersAreRemovedUntilTheListChanges(t *testing.T) {
 		t.Fatalf("changed list not applied: %v", got)
 	}
 }
+
+// The panel replaces a node's online IPs with each alive report, so a node with
+// nobody online still reports, clearing users who went offline.
+func TestAliveIsReportedWithNobodyOnline(t *testing.T) {
+	p := newFakePanel(t, "vless", testUsers(1))
+	ctrl, _ := startTestController(t, p)
+	before := len(p.AliveReports())
+	if err := ctrl.reportUserTrafficTask(t.Context()); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	reports := p.AliveReports()
+	if len(reports) != before+1 || reports[len(reports)-1] != "{}" {
+		t.Fatalf("expected an empty alive report, got %q", reports)
+	}
+}

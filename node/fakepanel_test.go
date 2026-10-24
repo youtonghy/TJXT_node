@@ -40,6 +40,8 @@ type fakePanel struct {
 	revoked []int
 	// certFingerprint is the last X-TJXT-Cert-SHA256 a node sent.
 	certFingerprint string
+	// aliveReports are the bodies of the alive reports.
+	aliveReports []string
 }
 
 func newFakePanel(t *testing.T, protocol string, users []panel.UserInfo) *fakePanel {
@@ -94,7 +96,9 @@ func (p *fakePanel) serve(w http.ResponseWriter, r *http.Request) {
 	case "/api/v1/server/UniProxy/alivelist":
 		_, _ = w.Write([]byte(`{"alive":{}}`))
 	case "/api/v1/server/UniProxy/alive":
-		_, _ = w.Write([]byte(`{"data":true}`))
+		body, _ := io.ReadAll(r.Body)
+		p.aliveReports = append(p.aliveReports, string(body))
+		_, _ = w.Write([]byte(`{"data":true,"device_limit_exceeded":[]}`))
 	case "/api/v1/server/UniProxy/push":
 		body, _ := io.ReadAll(r.Body)
 		var rec pushRecord
@@ -163,6 +167,12 @@ func (p *fakePanel) NotModified() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.notModified
+}
+
+func (p *fakePanel) AliveReports() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.aliveReports...)
 }
 
 func (p *fakePanel) Pushes() []pushRecord {
