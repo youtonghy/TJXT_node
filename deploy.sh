@@ -502,8 +502,8 @@ verify_panel() {
       return 0
     fi
     warn "$(grep '^tjxt-node:' <<<"$out" || printf '%s' "$out")"
-    # The panel answered, so the address is right and only the key is wrong.
-    if [[ "$rc" -eq 4 || "$rc" -eq 5 ]]; then
+    # The panel answered, so the address is right: the key or the node is wrong.
+    if [[ "$rc" -eq 4 || "$rc" -eq 5 || "$rc" -eq 8 ]]; then
       API_HOST=$cand
       break
     fi
@@ -512,7 +512,9 @@ verify_panel() {
     3) err "无法连接面板，请检查地址、端口、DNS 和本机网络" ;;
     4) err "面板拒绝了密钥：请在面板节点列表中复制该节点的密钥（可能已重置）" ;;
     5) err "这是全局通讯密钥，不是节点自己的密钥；请改用面板节点列表中该节点的密钥" ;;
-    *) err "面板校验失败：请确认地址是面板地址（不是订阅或节点地址）" ;;
+    7) err "该地址不是面板的节点接口：请确认地址是面板地址（不是订阅或节点地址）" ;;
+    8) err "面板已响应，但该节点的配置无法使用（原因见上）：请升级 tjxt-node，或检查面板中该节点的设置" ;;
+    *) err "面板校验失败（原因见上）" ;;
   esac
   return "$rc"
 }
@@ -559,7 +561,7 @@ confirm_panel() {
     [[ "$ans" =~ ^[Nn] ]] && die "已取消，未写入配置，服务未启动"
     ask_api_host
     case "$rc" in
-      3) ;; # unreachable: the key was never checked
+      3 | 7) ;; # unreachable or not a panel: the key was never checked
       *) ask_api_key ;;
     esac
   done

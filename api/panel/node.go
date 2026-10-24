@@ -213,10 +213,24 @@ func (c *Client) resolveNodeID(bc *BaseConfig) (int, error) {
 	return reported, nil
 }
 
+// ErrNotNodeAPI means the address answered with something that is not JSON,
+// e.g. a web page: it is not the panel's node API.
+var ErrNotNodeAPI = errors.New("the reply is not JSON; the address is not the panel's node API")
+
+// NodeConfigError means the panel sent a node config this node cannot use,
+// e.g. a field of the wrong type or an unsupported protocol.
+type NodeConfigError struct{ Err error }
+
+func (e *NodeConfigError) Error() string { return e.Err.Error() }
+func (e *NodeConfigError) Unwrap() error { return e.Err }
+
 func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
+	if !json.Valid(body) {
+		return nil, ErrNotNodeAPI
+	}
 	cm := &CommonNode{}
 	if err := json.Unmarshal(body, cm); err != nil {
-		return nil, fmt.Errorf("decode node params error: %s", err)
+		return nil, &NodeConfigError{fmt.Errorf("decode node params error: %s", err)}
 	}
 	id, err := c.resolveNodeID(cm.BaseConfig)
 	if err != nil {
@@ -238,9 +252,9 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 		node.Type = cm.Protocol
 		node.Security = 0
 	case "mtproto":
-		return nil, fmt.Errorf("mtproto nodes are retired; delete this node in the panel")
+		return nil, &NodeConfigError{errors.New("mtproto nodes are retired; delete this node in the panel")}
 	default:
-		return nil, fmt.Errorf("unsupport protocol: %s", cm.Protocol)
+		return nil, &NodeConfigError{fmt.Errorf("unsupport protocol: %s", cm.Protocol)}
 	}
 	node.Tag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, node.Id)
 	cf := cm.TlsSettings.CertFile

@@ -53,7 +53,7 @@ TJXT_API_KEY='this-node-own-key' tjxt-node pair --api-host https://panel.example
 
 `pair` fetches the node config with the key, prints the node id, type, name and address (`host:port`, or the port when the panel sets no host), and writes `-c` (default `/etc/tjxt-node/config.json`) with that single node and its `NodeID`. An existing config keeps its other settings (`Log`, `PprofPort`, ...) and its `Nodes` are replaced; a config with several nodes, or one that does not parse, is only replaced with `--force`. The file is written atomically with mode 0600 (directory 0750). Other flags: `--key` (default `$TJXT_API_KEY`; the environment keeps the key out of the process list), `--protocol auto|v3ui|v1`, `--timeout 15`, `--node-id N` (check a legacy key against a known id), `--dry-run` (check only, write nothing). The key is never printed.
 
-Exit codes: 0 paired, 1 other panel error, 2 invalid flags or URL, 3 panel unreachable, 4 key rejected, 5 global server token instead of a node key, 6 config not written.
+Exit codes: 0 paired, 1 other panel error, 2 invalid flags or URL, 3 panel unreachable, 4 key rejected, 5 global server token instead of a node key, 6 config not written, 7 the address does not serve the node API (HTTP 404 or a non-JSON reply), 8 the panel's config for this node cannot be used (a field this version cannot read, or an unsupported protocol).
 
 ### Startup
 

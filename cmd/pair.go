@@ -18,12 +18,14 @@ import (
 
 // Exit codes of tjxt-node pair.
 const (
-	exitPairFailed      = 1 // other panel answers, e.g. an unsupported protocol
+	exitPairFailed      = 1 // other panel answers, e.g. an HTTP 500
 	exitPairUsage       = 2 // missing or invalid flags, invalid --api-host URL
 	exitPairUnreachable = 3 // the panel cannot be reached
 	exitPairBadKey      = 4 // the panel rejected the key
 	exitPairGlobalToken = 5 // the key is the fleet-wide server token
 	exitPairConfig      = 6 // the config file cannot be written or is kept
+	exitPairNotPanel    = 7 // the address does not serve the node API
+	exitPairBadNode     = 8 // the panel sent a node config this node cannot use
 )
 
 type pairOptions struct {
@@ -181,6 +183,7 @@ func validatePanelURL(raw string) (string, error) {
 
 func classifyPairError(host string, err error) error {
 	var se *panel.StatusError
+	var nce *panel.NodeConfigError
 	var netErr net.Error
 	var urlErr *url.Error
 	switch {
@@ -188,9 +191,13 @@ func classifyPairError(host string, err error) error {
 		return pairFail(exitPairBadKey, "the panel rejected the key: check it in the panel's node list; it may have been rotated (%v)", err)
 	case errors.Is(err, panel.ErrNotPairingKey):
 		return &exitError{code: exitPairGlobalToken, err: err}
+	case errors.Is(err, panel.ErrNotNodeAPI):
+		return pairFail(exitPairNotPanel, "%s does not serve the node API (%v); check --api-host", host, err)
+	case errors.As(err, &nce):
+		return pairFail(exitPairBadNode, "the panel's config for this node cannot be used: %v; update tjxt-node or fix the node in the panel", err)
 	case errors.As(err, &se):
 		if se.Code == 404 {
-			return pairFail(exitPairFailed, "%s does not serve the node API (HTTP 404); check --api-host", host)
+			return pairFail(exitPairNotPanel, "%s does not serve the node API (HTTP 404); check --api-host", host)
 		}
 		return pairFail(exitPairFailed, "panel error: %v", err)
 	case errors.As(err, &netErr), errors.As(err, &urlErr), errors.Is(err, context.DeadlineExceeded):
