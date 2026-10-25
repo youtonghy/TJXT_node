@@ -36,6 +36,7 @@ type pairOptions struct {
 	Protocol   string
 	Timeout    int
 	Force      bool
+	Append     bool
 	DryRun     bool
 }
 
@@ -48,8 +49,9 @@ var pairCommand = cobra.Command{
 key belongs to, and write a config file with that single node.
 
 An existing config keeps its other settings (Log, PprofPort, ...); its Nodes
-are replaced by the paired node. A config with several nodes is only replaced
-with --force. --dry-run checks the key without writing anything.
+are replaced by the paired node. --append keeps existing nodes and adds this
+one. A config with several nodes is only replaced with --force. --dry-run
+checks the key without writing anything.
 
 --api-host and --key default to TJXT_API_HOST and TJXT_API_KEY; prefer the
 environment for the key so it does not show up in the process list.
@@ -78,6 +80,7 @@ func init() {
 	f.StringVarP(&pairOpts.ConfigPath, "config", "c", "/etc/tjxt-node/config.json", "config file to write")
 	f.StringVar(&pairOpts.Protocol, "protocol", "auto", "panel protocol: auto, v3ui or v1")
 	f.IntVar(&pairOpts.Timeout, "timeout", conf.DefaultNodeTimeout, "panel request timeout in seconds")
+	f.BoolVar(&pairOpts.Append, "append", false, "append the paired node to an existing config")
 	f.BoolVar(&pairOpts.Force, "force", false, "replace a config with several nodes or one that does not parse")
 	f.BoolVar(&pairOpts.DryRun, "dry-run", false, "check the key without writing the config")
 	command.AddCommand(&pairCommand)
@@ -98,6 +101,9 @@ func runPair(ctx context.Context, o pairOptions, out io.Writer) error {
 	}
 	if strings.TrimSpace(o.Key) == "" {
 		return pairFail(exitPairUsage, "--key (or %s) is required", conf.EnvAPIKey)
+	}
+	if o.Force && o.Append {
+		return pairFail(exitPairUsage, "--force and --append cannot be used together")
 	}
 	switch o.Protocol {
 	case "auto", "v3ui", "v1":
@@ -154,10 +160,32 @@ func runPair(ctx context.Context, o pairOptions, out io.Writer) error {
 		return nil
 	}
 	nc.RetryCount = nil
-	if err := conf.WriteSingleNode(o.ConfigPath, nc, o.Force); err != nil {
+	if o.Append {
+		if _, err := os.Stat(o.ConfigPath); err != nil {
+			return pairFail(exitPairConfig, "append requires an existing config %s: %v", o.ConfigPath, err)
+		}
+		exists, err := conf.MatchesNode(o.ConfigPath, nc)
+		if err != nil {
+			return pairFail(exitPairConfig, "read existing config: %v", err)
+		}
+		if exists {
+			fmt.Fprintf(out, "Node %d already exists in %s; keeping the existing config\n", info.Id, o.ConfigPath)
+			return nil
+		}
+	}
+	if o.Append {
+		err = conf.AppendNode(o.ConfigPath, nc)
+	} else {
+		err = conf.WriteSingleNode(o.ConfigPath, nc, o.Force)
+	}
+	if err != nil {
 		return pairFail(exitPairConfig, "write config: %v", err)
 	}
-	fmt.Fprintf(out, "Wrote %s with node %d\n", o.ConfigPath, info.Id)
+	if o.Append {
+		fmt.Fprintf(out, "Appended node %d to %s\n", info.Id, o.ConfigPath)
+	} else {
+		fmt.Fprintf(out, "Wrote %s with node %d\n", o.ConfigPath, info.Id)
+	}
 	return nil
 }
 

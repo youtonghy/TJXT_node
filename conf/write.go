@@ -13,6 +13,83 @@ import (
 // ErrMultiNodeConfig means WriteSingleNode would replace several nodes.
 var ErrMultiNodeConfig = errors.New("config has several nodes")
 
+// ErrNodeAlreadyConfigured means AppendNode would add a node already present.
+var ErrNodeAlreadyConfigured = errors.New("node is already configured")
+
+// MatchesNode reads the file without environment overrides and compares the
+// supplied connection settings to its nodes.
+func MatchesNode(path string, n NodeConfig) (bool, error) {
+	c := New()
+	if err := c.loadFile(path); err != nil {
+		return false, err
+	}
+	for _, old := range c.NodeConfigs {
+		if strings.TrimRight(old.APIHost, "/") == strings.TrimRight(n.APIHost, "/") && old.Key == n.Key &&
+			(old.NodeID == 0 || old.NodeID == n.NodeID) &&
+			(old.Protocol == n.Protocol || old.Protocol == "" && n.Protocol == "auto") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// AppendNode appends n to an existing JSON config while preserving its other
+// settings and existing nodes. Duplicate keys or known node IDs are rejected.
+func AppendNode(path string, n NodeConfig) error {
+	doc := map[string]json.RawMessage{}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read existing config: %w", err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || doc == nil {
+		if err == nil {
+			err = errors.New("config is null")
+		}
+		return fmt.Errorf("existing config %s is not valid JSON: %w", path, err)
+	}
+	var nodes []json.RawMessage
+	found := false
+	for key, value := range doc {
+		if strings.EqualFold(key, "Nodes") {
+			if found {
+				return errors.New("config has multiple Nodes entries")
+			}
+			found = true
+			if err := json.Unmarshal(value, &nodes); err != nil || nodes == nil {
+				return fmt.Errorf("existing config %s has an unreadable Nodes entry", path)
+			}
+			delete(doc, key)
+		}
+	}
+	if !found {
+		return errors.New("config has no Nodes entry")
+	}
+	for _, value := range nodes {
+		var existing nodeFile
+		if err := json.Unmarshal(value, &existing); err != nil || existing.APIHost == "" || existing.APIKey == "" {
+			return errors.New("config contains an invalid node")
+		}
+		if strings.TrimRight(existing.APIHost, "/") == strings.TrimRight(n.APIHost, "/") && (existing.APIKey == n.Key || n.NodeID > 0 && existing.NodeID == n.NodeID) {
+			return fmt.Errorf("%w (node id %d); replace the existing node instead", ErrNodeAlreadyConfigured, n.NodeID)
+		}
+	}
+	newNode, err := json.Marshal(nodeFile{APIHost: n.APIHost, APIKey: n.Key, NodeID: n.NodeID, Timeout: n.Timeout, Protocol: n.Protocol})
+	if err != nil {
+		return fmt.Errorf("encode node: %w", err)
+	}
+	nodes = append(nodes, newNode)
+	encoded, err := json.Marshal(nodes)
+	if err != nil {
+		return fmt.Errorf("encode nodes: %w", err)
+	}
+	doc["Nodes"] = encoded
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	return writeFileAtomic(path, append(out, '\n'))
+}
+
 // nodeFile is how WriteSingleNode writes a node.
 type nodeFile struct {
 	APIHost  string `json:"ApiHost"`

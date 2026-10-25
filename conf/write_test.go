@@ -51,6 +51,32 @@ func TestWriteSingleNodeKeepsSettingsAndIsPrivate(t *testing.T) {
 	}
 }
 
+func TestAppendNodePreservesExistingNodesAndSettings(t *testing.T) {
+	path := writeConfig(t, `{"Log":{"Level":"debug"},"PprofPort":6060,"Nodes":[{"ApiHost":"http://old","ApiKey":"old-key","NodeID":1}]}`)
+	n := NodeConfig{APIHost: "http://new", Key: "new-key", NodeID: 2, Timeout: 15, Protocol: "auto"}
+	if err := AppendNode(path, n); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	c := New()
+	if err := c.LoadFromPath(path); err != nil {
+		t.Fatal(err)
+	}
+	if c.LogConfig.Level != "debug" || c.PprofPort != 6060 || len(c.NodeConfigs) != 2 {
+		t.Fatalf("settings or nodes changed: %+v pprof=%d", c.LogConfig, c.PprofPort)
+	}
+	if c.NodeConfigs[1].Key != "new-key" || c.NodeConfigs[1].NodeID != 2 {
+		t.Fatalf("new node missing: %+v", c.NodeConfigs)
+	}
+}
+
+func TestAppendNodeRejectsDuplicate(t *testing.T) {
+	path := writeConfig(t, `{"Nodes":[{"ApiHost":"http://old","ApiKey":"old-key","NodeID":1}]}`)
+	n := NodeConfig{APIHost: "http://old", Key: "old-key", NodeID: 1}
+	if err := AppendNode(path, n); !errors.Is(err, ErrNodeAlreadyConfigured) {
+		t.Fatalf("want duplicate error, got %v", err)
+	}
+}
+
 func TestWriteSingleNodeRefusesMultiNodeWithoutForce(t *testing.T) {
 	multi := `{"Log":{"Level":"warn"},"Nodes":[{"ApiHost":"http://a","ApiKey":"1"},{"ApiHost":"http://b","ApiKey":"2"}]}`
 	path := writeConfig(t, multi)

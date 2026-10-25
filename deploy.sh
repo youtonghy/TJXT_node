@@ -36,6 +36,7 @@ GITHUB_REPO="${TJXT_GITHUB_REPO:-$DEFAULT_GITHUB_REPO}"
 VERSION="${TJXT_VERSION:-latest}"
 BUILD_FROM_SOURCE=0
 FORCE_CONFIG=0
+NODE_ACTION=""
 NO_START=0
 YES=0
 PURGE=0
@@ -85,6 +86,7 @@ TJXT_node 一键部署（TONG-ladder 节点）
   --prefix DIR              安装目录，默认 /usr/local/tjxt-node
   --config-dir DIR          配置目录，默认 /etc/tjxt-node
   --force-config            覆盖已有配置（新配置先经 tjxt-node pair 校验）
+  --node-action MODE        已有配置时选择 replace 或 append（默认交互询问）
   --no-start                安装后不启动服务
   --yes                     卸载时跳过确认
   --purge                   卸载时同时删除配置和日志
@@ -216,6 +218,10 @@ parse_args() {
         CONFIG_DIR="${1#*=}"; shift ;;
       --force-config)
         FORCE_CONFIG=1; shift ;;
+      --node-action)
+        NODE_ACTION="${2:-}"; shift 2 ;;
+      --node-action=*)
+        NODE_ACTION="${1#*=}"; shift ;;
       --no-start)
         NO_START=1; shift ;;
       --yes|-y)
@@ -233,6 +239,10 @@ parse_args() {
   case "$PROTOCOL" in
     auto|v3ui|v1) ;;
     *) die "--protocol 只能是 auto、v3ui 或 v1" ;;
+  esac
+  case "$NODE_ACTION" in
+    ""|replace|append) ;;
+    *) die "--node-action 只能是 replace 或 append" ;;
   esac
 }
 
@@ -445,28 +455,45 @@ ask_api_key() {
 # curl | bash it reads from the terminal.
 prompt_install_fields() {
   validate_node_id
-  if [[ -n "$API_HOST" && -n "$API_KEY" ]]; then
-    return
-  fi
   local cfg ans
   cfg="$(config_path)"
-  if [[ -f "$cfg" && "$FORCE_CONFIG" -eq 0 ]]; then
-    if ! can_prompt; then
-      log "已有配置 $cfg，跳过填写（需要覆盖请加 --force-config）"
+  if [[ -f "$cfg" && "$FORCE_CONFIG" -eq 0 && -z "$NODE_ACTION" ]]; then
+    if can_prompt; then
+      printf '检测到已有配置 %s。\n' "$cfg"
+      ask ans "选择 [a] 追加新节点 / [r] 替换节点配置（默认追加）: "
+      case "${ans,,}" in
+        ""|a|append) NODE_ACTION=append ;;
+        r|replace) NODE_ACTION=replace ;;
+        *) die "无效选择，未更改配置" ;;
+      esac
+    elif [[ -n "$API_KEY" ]]; then
+      die "检测到已有配置；请指定 --node-action append 或 --node-action replace"
+    elif [[ -n "$API_HOST" ]] && ! can_prompt; then
+      die "检测到已有配置；如需配置新节点，请提供 --api-key 和 --node-action append|replace"
+    else
+      log "已有配置 $cfg，跳过填写（如需添加节点，请提供节点参数）"
       return
     fi
-    ask ans "检测到已有配置 ${cfg}，是否重新填写面板地址和密钥？[y/N] "
-    if [[ ! "$ans" =~ ^[Yy] ]]; then
-      log "保留已有配置"
-      return
-    fi
-    FORCE_CONFIG=1
   fi
-  can_prompt || die "缺少 --api-host --api-key。非交互安装必须提供这两项。"
-  PROMPTED=1
-  printf "${cyan}对接 TONG-ladder 面板${plain}\n"
-  [[ -z "$API_HOST" ]] && ask_api_host
-  [[ -z "$API_KEY" ]] && ask_api_key
+  if [[ -n "$NODE_ACTION" && ! -f "$cfg" ]]; then
+    die "--node-action 仅适用于已有配置: $cfg"
+  fi
+  if [[ -f "$cfg" && "$FORCE_CONFIG" -eq 0 && -z "$API_KEY" && -z "$NODE_ACTION" ]]; then
+    if ! can_prompt; then
+      log "已有配置 $cfg，跳过填写（如需添加节点，请提供 --api-host --api-key）"
+      return
+    fi
+    ask ans "检测到已有配置 ${cfg}，是否配置另一个节点？[y/N] "
+    [[ "$ans" =~ ^[Yy] ]] || { log "保留已有配置"; return; }
+    NODE_ACTION=append
+  fi
+  can_prompt || { [[ -n "$API_HOST" && -n "$API_KEY" ]] || die "缺少 --api-host --api-key。非交互安装必须提供这两项。"; }
+  if [[ -z "$API_HOST" || -z "$API_KEY" ]]; then
+    PROMPTED=1
+    printf "${cyan}对接 TONG-ladder 面板${plain}\n"
+    [[ -z "$API_HOST" ]] && ask_api_host
+    [[ -z "$API_KEY" ]] && ask_api_key
+  fi
   return 0
 }
 
@@ -581,7 +608,7 @@ write_config() {
   cfg="$(config_path)"
   dest_dir="$(dirname "$cfg")"
   mkdir -p "$dest_dir" "$(dirname "$(log_path)")"
-  if [[ -f "$cfg" && "$FORCE_CONFIG" -eq 0 ]]; then
+  if [[ -f "$cfg" && "$FORCE_CONFIG" -eq 0 && -z "$NODE_ACTION" ]]; then
     log "保留已有配置 $cfg"
     return
   fi
@@ -595,7 +622,10 @@ write_config() {
   [[ -n "$NODE_ID" ]] && node_id_line="\"NodeID\": ${NODE_ID},"
   tmp="${cfg}.pairing"
   umask 077
-  cat >"$tmp" <<EOF
+  if [[ "$NODE_ACTION" == "append" ]]; then
+    cp -p "$cfg" "$tmp"
+  else
+    cat >"$tmp" <<EOF
 {
   "Log": {
     "Level": "info",
@@ -613,6 +643,7 @@ write_config() {
   ]
 }
 EOF
+  fi
   chmod 600 "$tmp"
   if ! pair_config "$tmp"; then
     rm -f "$tmp"
@@ -634,6 +665,8 @@ pair_config() {
   fi
   local -a args=(pair --api-host "$API_HOST" --protocol "$PROTOCOL" -c "$file")
   [[ -n "$NODE_ID" ]] && args+=(--node-id "$NODE_ID")
+  [[ "$NODE_ACTION" == "append" ]] && args+=(--append)
+  [[ "$NODE_ACTION" == "replace" || "$FORCE_CONFIG" -eq 1 ]] && args+=(--force)
   log "写入节点配置"
   TJXT_API_KEY="$API_KEY" "$bin" "${args[@]}" >/dev/null
 }
