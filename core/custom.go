@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -62,6 +63,19 @@ func privateEgressPolicy(infos []*panel.NodeInfo) (allowAll bool, allowTags []st
 	return false, allowTags
 }
 
+// routingMatchKeys are the match fields supported by Xray's RawFieldRule.
+var routingMatchKeys = []string{
+	"domain", "domains", "ip", "port", "network",
+	"sourceIP", "source", "sourcePort", "user", "vlessRoute",
+	"attrs", "localIP", "localPort", "process", "localOS", "webhook",
+}
+
+// outboundFieldKeys are the fields belonging to coreConf.OutboundDetourConfig.
+var outboundFieldKeys = []string{
+	"protocol", "sendThrough", "tag", "settings",
+	"streamSettings", "proxySettings", "mux", "targetStrategy",
+}
+
 func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHandlerConfig, *router.Config, error) {
 	//dns
 	queryStrategy := "UseIPv4v6"
@@ -94,11 +108,11 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 		return nil, nil, nil, fmt.Errorf("build block outbound: %w", err)
 	}
 	coreOutboundConfig = append(coreOutboundConfig, block)
-	dns, err := buildDnsOutbound()
+	dnsOut, err := buildDnsOutbound()
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("build dns outbound: %w", err)
 	}
-	coreOutboundConfig = append(coreOutboundConfig, dns)
+	coreOutboundConfig = append(coreOutboundConfig, dnsOut)
 
 	//route
 	domainStrategy := "AsIs"
@@ -112,80 +126,19 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 		DomainStrategy: &domainStrategy,
 	}
 
+	blockPrivate := !allowAll
 	for _, info := range infos {
-		if len(info.Common.Routes) == 0 {
+		if info == nil || info.Common == nil || len(info.Common.Routes) == 0 {
 			continue
 		}
-		for _, route := range info.Common.Routes {
-			switch route.Action {
-			case "dns":
-				if route.ActionValue == nil {
-					continue
-				}
-				server := &coreConf.NameServerConfig{
-					Address: &coreConf.Address{
-						Address: xnet.ParseAddress(*route.ActionValue),
-					},
-				}
-				if len(route.Match) != 0 {
-					server.Domains = route.Match
-					server.SkipFallback = true
-				}
-				coreDnsConfig.Servers = append(coreDnsConfig.Servers, server)
-			case "block":
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"domain":      route.Match,
-					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			case "block_ip":
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"ip":          route.Match,
-					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			case "block_port":
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"port":        strings.Join(route.Match, ","),
-					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			case "protocol":
-				rule := map[string]interface{}{
-					"inboundTag":  info.Tag,
-					"protocol":    route.Match,
-					"outboundTag": "block",
-				}
-				rawRule, err := json.Marshal(rule)
-				if err != nil {
-					continue
-				}
-				coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
-			case "route":
-				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "domain", route.Match, !allowAll)
-			case "route_ip":
-				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "ip", route.Match, !allowAll)
-			case "default_out":
-				coreOutboundConfig, coreRouterConfig.RuleList = addCustomOutboundRoute(coreOutboundConfig, coreRouterConfig.RuleList, info.Tag, route, "network", "tcp,udp", !allowAll)
-			default:
-				log.WithFields(log.Fields{"tag": info.Tag, "route": route.Id, "action": route.Action}).Warn("Skip route with unknown action")
-			}
-		}
+		coreDnsConfig.Servers, coreOutboundConfig, coreRouterConfig.RuleList = applyNodeRoutes(
+			coreDnsConfig.Servers,
+			coreOutboundConfig,
+			coreRouterConfig.RuleList,
+			info.Tag,
+			info.Common.Routes,
+			blockPrivate,
+		)
 	}
 	if len(allowTags) > 0 {
 		allowOutbound, err := buildFreedomOutbound(allowPrivateOutboundTag, true)
@@ -215,48 +168,419 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 	return DnsConfig, coreOutboundConfig, RouterConfig, nil
 }
 
-// addCustomOutboundRoute handles the route, route_ip and default_out actions:
-// action_value holds an Xray outbound whose tag the new rule points at. The
-// outbound is built before the rule is added, so a route whose outbound Xray
-// rejects is skipped (and logged) instead of pointing at a missing tag.
-//
-// Custom freedom outbounds are shared by tag across nodes, so they block private
-// destinations unless every node in the core allows private egress.
-func addCustomOutboundRoute(outbounds []*core.OutboundHandlerConfig, rules []json.RawMessage, inboundTag string, route panel.Route, matchKey string, matchValue interface{}, blockPrivate bool) ([]*core.OutboundHandlerConfig, []json.RawMessage) {
-	logger := log.WithFields(log.Fields{"tag": inboundTag, "route": route.Id, "action": route.Action})
-	if route.ActionValue == nil {
-		logger.Warn("Skip route without an outbound")
-		return outbounds, rules
+type pendingNodeRule struct {
+	routeID        int
+	ruleMap        map[string]json.RawMessage
+	pureOutbound   bool
+	targetOutbound string
+}
+
+// applyNodeRoutes applies a node's stacked outbound/routing rules in panel order.
+func applyNodeRoutes(
+	dnsServers []*coreConf.NameServerConfig,
+	outbounds []*core.OutboundHandlerConfig,
+	rules []json.RawMessage,
+	inboundTag string,
+	routes []panel.Route,
+	blockPrivate bool,
+) ([]*coreConf.NameServerConfig, []*core.OutboundHandlerConfig, []json.RawMessage) {
+	var pending []pendingNodeRule
+	referencedTags := map[string]bool{}
+
+	for _, route := range routes {
+		raw := routeRuleJSON(route)
+		if len(raw) == 0 {
+			continue
+		}
+		dnsServers, outbounds, pending = collectRouteItems(
+			dnsServers,
+			outbounds,
+			pending,
+			referencedTags,
+			inboundTag,
+			route.Id,
+			raw,
+			blockPrivate,
+		)
 	}
+
+	for _, item := range pending {
+		logger := log.WithFields(log.Fields{"tag": inboundTag, "route": item.routeID})
+		if item.pureOutbound {
+			// A pure outbound object (no match fields) acts as a catch-all rule at its
+			// position unless another rule on this node explicitly routes to its tag.
+			if referencedTags[item.targetOutbound] {
+				continue
+			}
+		}
+		if item.targetOutbound != "" && !hasOutboundWithTag(outbounds, item.targetOutbound) {
+			logger.WithField("outboundTag", item.targetOutbound).Warn("Skip route: target outbound is not registered")
+			continue
+		}
+		rawRule, err := json.Marshal(item.ruleMap)
+		if err != nil {
+			logger.WithError(err).Error("Skip route: marshal rule")
+			continue
+		}
+		if _, err := (&coreConf.RouterConfig{RuleList: []json.RawMessage{rawRule}}).Build(); err != nil {
+			logger.WithError(err).Error("Skip route: Xray rejected the routing rule")
+			continue
+		}
+		rules = append(rules, rawRule)
+	}
+
+	return dnsServers, outbounds, rules
+}
+
+// routeRuleJSON returns the Xray JSON payload for a panel Route, synthesizing
+// one from legacy action/match/action_value fields when talking to an older panel.
+func routeRuleJSON(route panel.Route) json.RawMessage {
+	trimmedRule := bytes.TrimSpace(route.Rule)
+	if len(trimmedRule) > 0 && !bytes.Equal(trimmedRule, []byte("null")) {
+		return trimmedRule
+	}
+	action := strings.TrimSpace(route.Action)
+	var val string
+	if route.ActionValue != nil {
+		val = strings.TrimSpace(*route.ActionValue)
+	}
+	if action == "" || action == "xray" {
+		if val == "" {
+			return nil
+		}
+		return json.RawMessage(val)
+	}
+
+	switch action {
+	case "dns":
+		if val == "" {
+			return nil
+		}
+		dnsObj := map[string]interface{}{"address": val}
+		if len(route.Match) > 0 {
+			dnsObj["domains"] = route.Match
+			dnsObj["skipFallback"] = true
+		}
+		raw, _ := json.Marshal(map[string]interface{}{"dns": dnsObj})
+		return raw
+	case "block":
+		raw, _ := json.Marshal(map[string]interface{}{"domain": route.Match, "outboundTag": "block"})
+		return raw
+	case "block_ip":
+		raw, _ := json.Marshal(map[string]interface{}{"ip": route.Match, "outboundTag": "block"})
+		return raw
+	case "block_port":
+		raw, _ := json.Marshal(map[string]interface{}{"port": strings.Join(route.Match, ","), "outboundTag": "block"})
+		return raw
+	case "protocol":
+		raw, _ := json.Marshal(map[string]interface{}{"protocol": route.Match, "outboundTag": "block"})
+		return raw
+	case "route", "route_ip":
+		if val == "" {
+			log.WithFields(log.Fields{"route": route.Id, "action": action}).Warn("Skip route without an outbound")
+			return nil
+		}
+		matchKey := "domain"
+		if action == "route_ip" {
+			matchKey = "ip"
+		}
+		var outboundObj map[string]json.RawMessage
+		if json.Unmarshal([]byte(val), &outboundObj) == nil && len(outboundObj) > 0 {
+			raw, _ := json.Marshal(map[string]interface{}{
+				matchKey:   route.Match,
+				"outbound": json.RawMessage(val),
+			})
+			return raw
+		}
+		raw, _ := json.Marshal(map[string]interface{}{
+			matchKey:      route.Match,
+			"outboundTag": val,
+		})
+		return raw
+	case "default_out":
+		if val == "" {
+			log.WithFields(log.Fields{"route": route.Id, "action": action}).Warn("Skip route without an outbound")
+			return nil
+		}
+		return json.RawMessage(val)
+	default:
+		log.WithFields(log.Fields{"route": route.Id, "action": action}).Warn("Skip route with unknown action")
+		return nil
+	}
+}
+
+func collectRouteItems(
+	dnsServers []*coreConf.NameServerConfig,
+	outbounds []*core.OutboundHandlerConfig,
+	pending []pendingNodeRule,
+	referencedTags map[string]bool,
+	inboundTag string,
+	routeID int,
+	raw json.RawMessage,
+	blockPrivate bool,
+) ([]*coreConf.NameServerConfig, []*core.OutboundHandlerConfig, []pendingNodeRule) {
+	logger := log.WithFields(log.Fields{"tag": inboundTag, "route": routeID})
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return dnsServers, outbounds, pending
+	}
+
+	if trimmed[0] == '[' {
+		var list []json.RawMessage
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			logger.WithError(err).Error("Skip route: invalid JSON array")
+			return dnsServers, outbounds, pending
+		}
+		for _, elem := range list {
+			dnsServers, outbounds, pending = collectRouteItems(
+				dnsServers,
+				outbounds,
+				pending,
+				referencedTags,
+				inboundTag,
+				routeID,
+				elem,
+				blockPrivate,
+			)
+		}
+		return dnsServers, outbounds, pending
+	}
+
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &obj); err != nil {
+		logger.WithError(err).Error("Skip route: invalid JSON object")
+		return dnsServers, outbounds, pending
+	}
+	if len(obj) == 0 {
+		return dnsServers, outbounds, pending
+	}
+
+	// 1. Composite Xray fragment containing "dns", "outbounds", "rules", or "routing".
+	_, hasDNS := obj["dns"]
+	_, hasOutbounds := obj["outbounds"]
+	_, hasRules := obj["rules"]
+	_, hasRouting := obj["routing"]
+	if hasDNS || hasOutbounds || hasRules || hasRouting {
+		if rawDNS, ok := obj["dns"]; ok {
+			dnsServers = appendDNSFromJSON(dnsServers, rawDNS, logger)
+		}
+		if rawOutbounds, ok := obj["outbounds"]; ok {
+			var obList []json.RawMessage
+			if err := json.Unmarshal(rawOutbounds, &obList); err != nil {
+				logger.WithError(err).Error("Skip route: invalid outbounds array")
+			} else {
+				for idx, rawOb := range obList {
+					defaultTag := fmt.Sprintf("route_%d_%d", routeID, idx)
+					outbounds, _, _ = registerCustomOutbound(outbounds, rawOb, defaultTag, blockPrivate, logger)
+				}
+			}
+		}
+		if rawRules, ok := obj["rules"]; ok {
+			dnsServers, outbounds, pending = collectRouteItems(
+				dnsServers, outbounds, pending, referencedTags, inboundTag, routeID, rawRules, blockPrivate,
+			)
+		}
+		if rawRouting, ok := obj["routing"]; ok {
+			var routingObj struct {
+				Rules []json.RawMessage `json:"rules"`
+			}
+			if err := json.Unmarshal(rawRouting, &routingObj); err != nil {
+				logger.WithError(err).Error("Skip route: invalid routing object")
+			} else {
+				for _, r := range routingObj.Rules {
+					dnsServers, outbounds, pending = collectRouteItems(
+						dnsServers, outbounds, pending, referencedTags, inboundTag, routeID, r, blockPrivate,
+					)
+				}
+			}
+		}
+		return dnsServers, outbounds, pending
+	}
+
+	// 2. Routing rule object (has outboundTag, balancerTag, or inline outbound).
+	_, hasOutboundTag := obj["outboundTag"]
+	_, hasBalancerTag := obj["balancerTag"]
+	rawInlineOutbound, hasInlineOutbound := obj["outbound"]
+	if hasOutboundTag || hasBalancerTag || hasInlineOutbound {
+		ruleMap := make(map[string]json.RawMessage, len(obj)+1)
+		for k, v := range obj {
+			if k != "outbound" {
+				ruleMap[k] = v
+			}
+		}
+		var targetTag string
+		if hasInlineOutbound {
+			defaultTag := fmt.Sprintf("route_%d", routeID)
+			var ok bool
+			outbounds, targetTag, ok = registerCustomOutbound(outbounds, rawInlineOutbound, defaultTag, blockPrivate, logger)
+			if !ok {
+				return dnsServers, outbounds, pending
+			}
+			tagBytes, _ := json.Marshal(targetTag)
+			ruleMap["outboundTag"] = tagBytes
+		} else if hasOutboundTag {
+			var rawTag string
+			if err := json.Unmarshal(obj["outboundTag"], &rawTag); err != nil || strings.TrimSpace(rawTag) == "" {
+				logger.Error("Skip route: invalid outboundTag")
+				return dnsServers, outbounds, pending
+			}
+			targetTag = normalizeOutboundTag(rawTag)
+			tagBytes, _ := json.Marshal(targetTag)
+			ruleMap["outboundTag"] = tagBytes
+			referencedTags[targetTag] = true
+		}
+		inboundBytes, _ := json.Marshal(inboundTag)
+		ruleMap["inboundTag"] = inboundBytes
+		pending = append(pending, pendingNodeRule{
+			routeID:        routeID,
+			ruleMap:        ruleMap,
+			pureOutbound:   false,
+			targetOutbound: targetTag,
+		})
+		return dnsServers, outbounds, pending
+	}
+
+	// 3. Xray Outbound object (has "protocol" string, optionally accompanied by routing match fields).
+	var proto string
+	if rawProto, ok := obj["protocol"]; ok && json.Unmarshal(rawProto, &proto) == nil && strings.TrimSpace(proto) != "" {
+		outboundMap := make(map[string]json.RawMessage)
+		for _, k := range outboundFieldKeys {
+			if v, exists := obj[k]; exists {
+				outboundMap[k] = v
+			}
+		}
+		rawOutbound, err := json.Marshal(outboundMap)
+		if err != nil {
+			logger.WithError(err).Error("Skip route: marshal outbound")
+			return dnsServers, outbounds, pending
+		}
+		defaultTag := fmt.Sprintf("route_%d", routeID)
+		var tag string
+		var ok bool
+		outbounds, tag, ok = registerCustomOutbound(outbounds, rawOutbound, defaultTag, blockPrivate, logger)
+		if !ok {
+			return dnsServers, outbounds, pending
+		}
+
+		ruleMap := make(map[string]json.RawMessage)
+		hasMatch := false
+		for _, k := range routingMatchKeys {
+			if v, exists := obj[k]; exists {
+				ruleMap[k] = v
+				hasMatch = true
+			}
+		}
+		if !hasMatch {
+			netBytes, _ := json.Marshal("tcp,udp")
+			ruleMap["network"] = netBytes
+		}
+		inboundBytes, _ := json.Marshal(inboundTag)
+		tagBytes, _ := json.Marshal(tag)
+		ruleMap["inboundTag"] = inboundBytes
+		ruleMap["outboundTag"] = tagBytes
+
+		pending = append(pending, pendingNodeRule{
+			routeID:        routeID,
+			ruleMap:        ruleMap,
+			pureOutbound:   !hasMatch,
+			targetOutbound: tag,
+		})
+		return dnsServers, outbounds, pending
+	}
+
+	logger.Warn("Skip route: unrecognized Xray rule JSON")
+	return dnsServers, outbounds, pending
+}
+
+func normalizeOutboundTag(tag string) string {
+	trimmed := strings.TrimSpace(tag)
+	switch strings.ToLower(trimmed) {
+	case "direct", "default":
+		return DefaultOutboundTag
+	case "blackhole":
+		return "block"
+	default:
+		return trimmed
+	}
+}
+
+func appendDNSFromJSON(servers []*coreConf.NameServerConfig, raw json.RawMessage, logger *log.Entry) []*coreConf.NameServerConfig {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return servers
+	}
+	if trimmed[0] == '[' {
+		var list []json.RawMessage
+		if err := json.Unmarshal(trimmed, &list); err != nil {
+			logger.WithError(err).Error("Skip route: invalid dns array")
+			return servers
+		}
+		for _, item := range list {
+			servers = appendDNSFromJSON(servers, item, logger)
+		}
+		return servers
+	}
+	var wrapper struct {
+		Address      string   `json:"address"`
+		Domains      []string `json:"domains"`
+		SkipFallback bool     `json:"skipFallback"`
+	}
+	if err := json.Unmarshal(trimmed, &wrapper); err == nil && strings.TrimSpace(wrapper.Address) != "" {
+		srv := &coreConf.NameServerConfig{
+			Address: &coreConf.Address{
+				Address: xnet.ParseAddress(strings.TrimSpace(wrapper.Address)),
+			},
+		}
+		if len(wrapper.Domains) > 0 {
+			srv.Domains = wrapper.Domains
+			srv.SkipFallback = true
+		} else if wrapper.SkipFallback {
+			srv.SkipFallback = true
+		}
+		return append(servers, srv)
+	}
+	var srv coreConf.NameServerConfig
+	if err := json.Unmarshal(trimmed, &srv); err != nil || srv.Address == nil {
+		logger.Error("Skip route: invalid dns server JSON")
+		return servers
+	}
+	return append(servers, &srv)
+}
+
+// registerCustomOutbound builds and appends an Xray outbound if its tag is not
+// already present. Custom freedom outbounds are shared by tag across nodes, so
+// they block private destinations unless every node in the core allows private egress.
+func registerCustomOutbound(
+	outbounds []*core.OutboundHandlerConfig,
+	rawOutbound json.RawMessage,
+	defaultTag string,
+	blockPrivate bool,
+	logger *log.Entry,
+) ([]*core.OutboundHandlerConfig, string, bool) {
 	outbound := &coreConf.OutboundDetourConfig{}
-	if err := json.Unmarshal([]byte(*route.ActionValue), outbound); err != nil {
+	if err := json.Unmarshal(rawOutbound, outbound); err != nil {
 		logger.WithError(err).Error("Skip route: invalid outbound JSON")
-		return outbounds, rules
+		return outbounds, "", false
+	}
+	outbound.Tag = strings.TrimSpace(outbound.Tag)
+	if outbound.Tag == "" {
+		outbound.Tag = defaultTag
 	}
 	if !hasOutboundWithTag(outbounds, outbound.Tag) {
 		if strings.EqualFold(outbound.Protocol, "freedom") {
 			if err := applyPrivateEgressPolicy(outbound, blockPrivate); err != nil {
 				logger.WithError(err).Error("Skip route: invalid freedom settings")
-				return outbounds, rules
+				return outbounds, "", false
 			}
 		}
 		built, err := outbound.Build()
 		if err != nil {
 			logger.WithError(err).Error("Skip route: Xray rejected the outbound")
-			return outbounds, rules
+			return outbounds, "", false
 		}
 		outbounds = append(outbounds, built)
 	}
-	rawRule, err := json.Marshal(map[string]interface{}{
-		"inboundTag":  inboundTag,
-		matchKey:      matchValue,
-		"outboundTag": outbound.Tag,
-	})
-	if err != nil {
-		logger.WithError(err).Error("Skip route: marshal rule")
-		return outbounds, rules
-	}
-	return outbounds, append(rules, rawRule)
+	return outbounds, outbound.Tag, true
 }
 
 // applyPrivateEgressPolicy makes a panel freedom outbound follow the node's

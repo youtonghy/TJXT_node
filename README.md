@@ -25,7 +25,7 @@ Authenticate with `X-Server-Token: <per-node server_key>` only; the key is never
 - A config change that touches only one node's inbound (protocol, transport, TLS/REALITY, port, ...) rebuilds that inbound alone; the other nodes in the process keep their connections. Changes to routes, `base_config` (private egress, intervals) or the node's tag restart the Xray core, as before.
 - An empty user list is valid: the inbound stays down and comes up when users appear. A 304 means unchanged.
 - Private, loopback, link-local and metadata destinations are blocked unless the panel sets `base_config.allow_private_egress: true` for the node.
-- `routes` are applied in panel order; a route whose outbound Xray rejects is skipped and logged.
+- `routes` carry Xray JSON outbound/routing rules (`rule`) and are stacked and applied in panel order; a rule whose outbound or routing rule Xray rejects is skipped and logged.
 
 ## Config
 

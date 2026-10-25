@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/xtls/xray-core/proxy/freedom"
@@ -13,11 +14,12 @@ func TestCustomOutboundRoutes(t *testing.T) {
 	rejected := `{"tag":"bad-out","protocol":"no-such-protocol"}`
 	info := nodeWithEgress("in", "")
 	info.Common.Routes = []panel.Route{
-		{Id: 1, Action: "route", Match: []string{"example.com"}, ActionValue: &valid},
-		{Id: 2, Action: "route_ip", Match: []string{"1.1.1.1/32"}, ActionValue: &valid},
-		{Id: 3, Action: "route", Match: []string{"a.test"}, ActionValue: &invalidJSON},
-		{Id: 4, Action: "default_out", ActionValue: &rejected},
-		{Id: 5, Action: "route"},
+		{Id: 1, Rule: json.RawMessage(`{"domain":["example.com"],"outbound":{"tag":"proxy-out","protocol":"freedom"}}`)},
+		{Id: 2, Rule: json.RawMessage(`{"ip":["1.1.1.1/32"],"outboundTag":"proxy-out"}`)},
+		{Id: 3, Rule: json.RawMessage(invalidJSON)},
+		{Id: 4, Rule: json.RawMessage(rejected)},
+		{Id: 5, Rule: json.RawMessage(`{"domain":["bad.example"],"outboundTag":"bad-out"}`)},
+		{Id: 6, Action: "route", Match: []string{"legacy.example"}, ActionValue: &valid},
 	}
 	_, outbounds, router, err := GetCustomConfig([]*panel.NodeInfo{info})
 	if err != nil {
@@ -39,11 +41,38 @@ func TestCustomOutboundRoutes(t *testing.T) {
 	for _, rule := range router.GetRule() {
 		targets[rule.GetTag()]++
 	}
-	if targets["proxy-out"] != 2 {
-		t.Fatalf("expected 2 rules to proxy-out, got %v", targets)
+	if targets["proxy-out"] != 3 {
+		t.Fatalf("expected 3 rules to proxy-out, got %v", targets)
 	}
 	if targets["bad-out"] != 0 {
 		t.Fatalf("no rule may point at a rejected outbound, got %v", targets)
+	}
+}
+
+func TestStackedXrayJsonOutboundRulesOrder(t *testing.T) {
+	info := nodeWithEgress("node-a", "")
+	info.Common.Routes = []panel.Route{
+		{Id: 10, Rule: json.RawMessage(`{"domain":["full:blocked.test"],"outboundTag":"block"}`)},
+		{Id: 11, Rule: json.RawMessage(`{"domain":["full:direct.test"],"outboundTag":"direct"}`)},
+		{Id: 12, Rule: json.RawMessage(`{"tag":"fallback-out","protocol":"freedom"}`)},
+	}
+	_, outbounds, router, err := GetCustomConfig([]*panel.NodeInfo{info})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !hasOutboundWithTag(outbounds, "fallback-out") {
+		t.Fatal("expected fallback-out outbound to be registered")
+	}
+	rules := router.GetRule()
+	// Rule 0 is the built-in UDP/53 -> dns_out rule; rules 1..3 come from the stacked routes.
+	if len(rules) != 4 {
+		t.Fatalf("expected 4 router rules, got %d", len(rules))
+	}
+	wantTags := []string{"dns_out", "block", DefaultOutboundTag, "fallback-out"}
+	for i, want := range wantTags {
+		if got := rules[i].GetTag(); got != want {
+			t.Fatalf("rule[%d] tag = %q, want %q", i, got, want)
+		}
 	}
 }
 
@@ -59,7 +88,7 @@ func TestCustomFreedomOutboundBlocksPrivateEgress(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info := nodeWithEgress("in", tc.baseConfig)
-			info.Common.Routes = []panel.Route{{Id: 1, Action: "default_out", ActionValue: &custom}}
+			info.Common.Routes = []panel.Route{{Id: 1, Rule: json.RawMessage(custom)}}
 			_, outbounds, _, err := GetCustomConfig([]*panel.NodeInfo{info})
 			if err != nil {
 				t.Fatalf("build: %v", err)
@@ -83,7 +112,7 @@ func TestCustomFreedomOutboundBlocksPrivateEgress(t *testing.T) {
 func TestCustomFreedomOutboundAllowsPrivateWhenNodeAllows(t *testing.T) {
 	custom := `{"tag":"custom-redirect","protocol":"freedom","settings":{"redirect":"10.0.0.2:80"}}`
 	info := nodeWithEgress("in", `{"allow_private_egress":true}`)
-	info.Common.Routes = []panel.Route{{Id: 1, Action: "default_out", ActionValue: &custom}}
+	info.Common.Routes = []panel.Route{{Id: 1, Rule: json.RawMessage(custom)}}
 	_, outbounds, _, err := GetCustomConfig([]*panel.NodeInfo{info})
 	if err != nil {
 		t.Fatalf("build: %v", err)
