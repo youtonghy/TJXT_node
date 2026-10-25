@@ -160,3 +160,68 @@ func TestPairRefusesMultiNodeConfig(t *testing.T) {
 		t.Fatalf("forced pair: %v", err)
 	}
 }
+
+// machinePairPanel answers the machine endpoint for machineKey and the node
+// config endpoint for any other key.
+func machinePairPanel(t *testing.T, machineKey string) *httptest.Server {
+	t.Helper()
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("X-Server-Token")
+		switch {
+		case r.URL.Path == "/api/v1/server/UniProxy/machine" && key == machineKey:
+			_, _ = w.Write([]byte(`{"machine_id":4,"name":"Tokyo","pull_interval":60,"nodes":[{"id":5,"name":"A","protocol":"vless"}]}`))
+		case r.URL.Path == "/api/v1/server/UniProxy/machine":
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error_code":"node_unauthorized"}`))
+		case r.URL.Path == "/api/v2/server/config" && key == testKey:
+			_, _ = w.Write([]byte(`{"protocol":"vless","server_port":443,"base_config":{"node_id":42}}`))
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error_code":"node_unauthorized"}`))
+		}
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func TestPairWritesMachineForAMachineKey(t *testing.T) {
+	const machineKey = "machine-secret-key-5678"
+	s := machinePairPanel(t, machineKey)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"Nodes":[{"ApiHost":"`+s.URL+`","ApiKey":"own","NodeID":5},{"ApiHost":"http://other","ApiKey":"o","NodeID":9}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := testPairOpts(s.URL, path)
+	o.Key, o.Append = machineKey, true
+	var out bytes.Buffer
+	if err := runPair(t.Context(), o, &out); err != nil {
+		t.Fatalf("pair: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), `Key belongs to machine 4 (name "Tokyo")`) ||
+		!strings.Contains(out.String(), `Machine node 5 (type vless, name "A")`) {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	c := conf.New()
+	if err := c.LoadFromPath(path); err != nil {
+		t.Fatal(err)
+	}
+	if c.Machine == nil || c.Machine.Key != machineKey || len(c.NodeConfigs) != 1 || c.NodeConfigs[0].NodeID != 9 {
+		t.Fatalf("machine = %+v nodes = %+v", c.Machine, c.NodeConfigs)
+	}
+
+	// A node key on the same panel still pairs as a node.
+	nodePath := filepath.Join(t.TempDir(), "node.json")
+	out.Reset()
+	if err := runPair(t.Context(), testPairOpts(s.URL, nodePath), &out); err != nil {
+		t.Fatalf("node key: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "Key belongs to node 42") {
+		t.Fatalf("output:\n%s", out.String())
+	}
+	// A key that is neither is still reported as rejected.
+	o = testPairOpts(s.URL, nodePath)
+	o.Key = "wrong-key-000000000"
+	if code := exitCode(t, runPair(t.Context(), o, &out)); code != exitPairBadKey {
+		t.Fatalf("exit code = %d", code)
+	}
+}

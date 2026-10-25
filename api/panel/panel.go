@@ -30,6 +30,7 @@ type Client struct {
 	v3Failed         bool
 	nodeEtag         string
 	userEtag         string
+	machineEtag      string
 	responseBodyHash string
 	// certSHA256 is the hex SHA-256 of the node's TLS certificate, reported so
 	// clients can pin a self-signed one.

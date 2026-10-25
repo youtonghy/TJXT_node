@@ -4,12 +4,10 @@
     "Output": "",
     "Access": "none"
   },
-  "Nodes": [
-    {
-      "ApiHost": "http://127.0.0.1:3000",
-      "ApiKey": "this-node-own-key",
-      "Protocol": "auto",
-      "Timeout": 15
-    }
-  ]
+  "Machine": {
+    "ApiHost": "http://127.0.0.1:3000",
+    "ApiKey": "this-machine-key",
+    "Protocol": "auto",
+    "Timeout": 15
+  }
 }

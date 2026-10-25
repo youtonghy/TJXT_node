@@ -62,7 +62,14 @@ func AppendNode(path string, n NodeConfig) error {
 		}
 	}
 	if !found {
-		return errors.New("config has no Nodes entry")
+		// A machine-only config gets its first own node.
+		machine := false
+		for key := range doc {
+			machine = machine || strings.EqualFold(key, "Machine")
+		}
+		if !machine {
+			return errors.New("config has no Nodes entry")
+		}
 	}
 	for _, value := range nodes {
 		var existing nodeFile
@@ -159,6 +166,101 @@ func WriteSingleNode(path string, n NodeConfig, force bool) error {
 		return err
 	}
 	doc["Nodes"] = nodes
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	return writeFileAtomic(path, append(out, '\n'))
+}
+
+// machineFile is how WriteMachine writes the machine.
+type machineFile struct {
+	APIHost  string `json:"ApiHost"`
+	APIKey   string `json:"ApiKey"`
+	Timeout  int    `json:"Timeout,omitempty"`
+	Protocol string `json:"Protocol,omitempty"`
+}
+
+// WriteMachine writes m as the config's Machine, keeping every other top-level
+// setting. Nodes the machine now runs (same panel, an id in nodeIDs) and nodes
+// configured with the machine key itself are dropped from Nodes; with
+// keepNodes the other nodes stay, otherwise Nodes is removed, which a config
+// with more than one node only allows with force (ErrMultiNodeConfig). Like
+// WriteSingleNode, a missing file is created, an unreadable one is only
+// replaced with force, and the file is written atomically with mode 0600.
+func WriteMachine(path string, m MachineConfig, nodeIDs []int, keepNodes, force bool) error {
+	doc := map[string]json.RawMessage{}
+	old, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return fmt.Errorf("read existing config: %w", err)
+	default:
+		if err := json.Unmarshal(old, &doc); err != nil {
+			if !force {
+				return fmt.Errorf("existing config %s is not valid JSON (%v); fix it, or use --force to replace it", path, err)
+			}
+			doc = map[string]json.RawMessage{}
+		}
+		if doc == nil {
+			doc = map[string]json.RawMessage{}
+		}
+	}
+	runs := make(map[int]bool, len(nodeIDs))
+	for _, id := range nodeIDs {
+		runs[id] = true
+	}
+	hasLog := false
+	var kept []json.RawMessage
+	for k, v := range doc {
+		switch {
+		case strings.EqualFold(k, "Log"):
+			hasLog = true
+		case strings.EqualFold(k, "Machine"):
+			delete(doc, k)
+		case strings.EqualFold(k, "Nodes"):
+			var nodes []json.RawMessage
+			if err := json.Unmarshal(v, &nodes); err != nil && !force {
+				return fmt.Errorf("existing config %s has an unreadable Nodes entry (%v); use --force to replace it", path, err)
+			}
+			delete(doc, k)
+			var others []json.RawMessage
+			for _, raw := range nodes {
+				var n nodeFile
+				if err := json.Unmarshal(raw, &n); err == nil && SameAPIHost(n.APIHost, m.APIHost) &&
+					(n.APIKey == m.Key || n.NodeID > 0 && runs[n.NodeID]) {
+					continue
+				}
+				others = append(others, raw)
+			}
+			if !keepNodes && len(others) > 1 && !force {
+				return fmt.Errorf("%w (%d) in %s; pairing a machine replaces them, use --force to do that", ErrMultiNodeConfig, len(others), path)
+			}
+			if keepNodes {
+				kept = others
+			}
+		}
+	}
+	if !hasLog {
+		def := New().LogConfig
+		raw, err := json.Marshal(map[string]string{"Level": def.Level, "Output": def.Output, "Access": def.Access})
+		if err != nil {
+			return err
+		}
+		doc["Log"] = raw
+	}
+	if len(kept) > 0 {
+		nodes, err := json.Marshal(kept)
+		if err != nil {
+			return fmt.Errorf("encode nodes: %w", err)
+		}
+		doc["Nodes"] = nodes
+	}
+	machine, err := json.Marshal(machineFile{APIHost: m.APIHost, APIKey: m.Key, Timeout: m.Timeout, Protocol: m.Protocol})
+	if err != nil {
+		return fmt.Errorf("encode machine: %w", err)
+	}
+	doc["Machine"] = machine
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode config: %w", err)

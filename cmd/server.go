@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
@@ -60,6 +61,62 @@ type prepared struct {
 	nodes *node.Node
 }
 
+// machineFetchTimeout bounds the first fetch of a machine's node list, which
+// runs before the nodes start.
+const machineFetchTimeout = 30 * time.Second
+
+// machineRunner keeps the machine pairing of the configuration (if any) and
+// polls its node list in the background, across generations of nodes.
+type machineRunner struct {
+	machine *node.Machine
+	cancel  context.CancelFunc
+	changed chan struct{}
+}
+
+// sync makes the runner follow c.Machine: an unchanged machine keeps running,
+// a new one fetches its node list once (a failure leaves it empty until a poll
+// gets it) and starts polling.
+func (r *machineRunner) sync(c *conf.Conf) {
+	if r.machine != nil && r.machine.Matches(c.Machine) {
+		return
+	}
+	r.stop()
+	if c.Machine == nil {
+		return
+	}
+	m, err := node.NewMachine(*c.Machine)
+	if err != nil {
+		log.WithField("err", err).Error("Create machine client failed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), machineFetchTimeout)
+	if _, err := m.Refresh(ctx); err != nil {
+		log.WithFields(log.Fields{"api_host": c.Machine.APIHost, "err": err}).
+			Error("Cannot get the machine's node list yet; its nodes start once a poll gets it")
+	}
+	cancel()
+	ctx, r.cancel = context.WithCancel(context.Background())
+	r.machine = m
+	go m.Run(ctx, func() {
+		select {
+		case r.changed <- struct{}{}:
+		default: // a change is queued already
+		}
+	})
+}
+
+func (r *machineRunner) stop() {
+	if r.cancel != nil {
+		r.cancel()
+	}
+	r.machine, r.cancel = nil, nil
+}
+
+// desired returns the nodes c runs: its Nodes and the machine's.
+func (r *machineRunner) desired(c *conf.Conf) []conf.NodeConfig {
+	return node.Desired(c.NodeConfigs, r.machine)
+}
+
 func serverHandle(_ *cobra.Command, _ []string) error {
 	showVersion()
 	log.SetFormatter(&log.TextFormatter{
@@ -87,6 +144,9 @@ func serverHandle(_ *cobra.Command, _ []string) error {
 		}()
 	}
 	var reloadCh = make(chan struct{}, 1)
+	machines := &machineRunner{changed: make(chan struct{}, 1)}
+	defer machines.stop()
+	machines.sync(c)
 
 	// running is the configuration of current. retry re-attempts a start or
 	// reload that failed: while the old (or rolled-back) instance keeps
@@ -102,7 +162,7 @@ func serverHandle(_ *cobra.Command, _ []string) error {
 		retry = time.After(backoff)
 		backoff = min(backoff*2, restartBackoffMax)
 	}
-	next, err := prepareConf(c, nil)
+	next, err := prepareConf(c, machines.desired(c), nil)
 	if err == nil {
 		current, err = next.start(reloadCh)
 	}
@@ -148,7 +208,7 @@ func serverHandle(_ *cobra.Command, _ []string) error {
 		if running != nil {
 			prev = running.nodes
 		}
-		next, err := prepare(config, prev)
+		next, err := prepare(config, machines, prev)
 		if err != nil {
 			if current != nil {
 				log.Warn("new config rejected, keeping the running one")
@@ -198,6 +258,22 @@ func serverHandle(_ *cobra.Command, _ []string) error {
 			attemptReload()
 		case <-retry:
 			attemptReload()
+		case <-machines.changed:
+			if retry != nil || current == nil {
+				// The pending reload or retry reads the new list.
+				continue
+			}
+			applied, err := running.nodes.Apply(running.conf, machines.desired(running.conf), current.core)
+			switch {
+			case err != nil:
+				log.WithField("err", err).Error("Changing the machine's nodes in place failed, reloading all nodes")
+				attemptReload()
+			case applied:
+				logStarted(running)
+			default:
+				log.Info("Machine's node list changed, reloading all nodes")
+				attemptReload()
+			}
 		}
 	}
 }
@@ -212,27 +288,29 @@ func loadConfig(path string) (*conf.Conf, error) {
 }
 
 // prepare loads, validates and resolves a configuration without touching the
-// running instance. prev is the running generation of nodes, if any.
-func prepare(path string, prev *node.Node) (*prepared, error) {
+// running instance, and makes machines follow its machine pairing. prev is the
+// running generation of nodes, if any.
+func prepare(path string, machines *machineRunner, prev *node.Node) (*prepared, error) {
 	c, err := loadConfig(path)
 	if err != nil {
 		return nil, err
 	}
-	return prepareConf(c, prev)
+	machines.sync(c)
+	return prepareConf(c, machines.desired(c), prev)
 }
 
-// prepareConf fetches the node configs and checks that the Xray config builds.
-// Nodes whose config cannot be fetched are left pending rather than failing
-// the whole configuration.
-func prepareConf(c *conf.Conf, prev *node.Node) (*prepared, error) {
-	nodes, err := node.New(c.NodeConfigs, prev)
+// prepareConf fetches the configs of nodes and checks that the Xray config
+// builds. Nodes whose config cannot be fetched are left pending rather than
+// failing the whole configuration.
+func prepareConf(c *conf.Conf, nodes []conf.NodeConfig, prev *node.Node) (*prepared, error) {
+	generation, err := node.New(nodes, prev)
 	if err != nil {
 		return nil, fmt.Errorf("get node info: %w", err)
 	}
-	if _, err := core.BuildConfig(c, nodes.NodeInfos); err != nil {
+	if _, err := core.BuildConfig(c, generation.NodeInfos); err != nil {
 		return nil, fmt.Errorf("build xray config: %w", err)
 	}
-	return &prepared{conf: c, nodes: nodes}, nil
+	return &prepared{conf: c, nodes: generation}, nil
 }
 
 func logStarted(p *prepared) {

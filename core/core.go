@@ -141,6 +141,67 @@ func BuildConfig(c *conf.Conf, infos []*panel.NodeInfo) (*core.Config, error) {
 	}, nil
 }
 
+// SameConfig reports whether nodes a and b build the same Xray config (DNS,
+// outbounds and routing; inbounds are added per node at runtime), so a core
+// started for a can serve b by adding and removing inbounds only.
+func SameConfig(c *conf.Conf, a, b []*panel.NodeInfo) (bool, error) {
+	ca, err := BuildConfig(c, a)
+	if err != nil {
+		return false, err
+	}
+	cb, err := BuildConfig(c, b)
+	if err != nil {
+		return false, err
+	}
+	return sameCoreConfig(ca, cb), nil
+}
+
+// sameCoreConfig compares two Xray configs by the messages their typed
+// settings decode to: the encoded bytes may differ for equal messages (map
+// fields are marshalled in random order). A config that cannot be decoded
+// counts as different, which only costs a full reload.
+func sameCoreConfig(a, b *core.Config) bool {
+	if len(a.App) != len(b.App) || len(a.Inbound) != len(b.Inbound) || len(a.Outbound) != len(b.Outbound) {
+		return false
+	}
+	for i := range a.App {
+		if !sameTyped(a.App[i], b.App[i]) {
+			return false
+		}
+	}
+	for i := range a.Inbound {
+		x, y := a.Inbound[i], b.Inbound[i]
+		if x.Tag != y.Tag || !sameTyped(x.ReceiverSettings, y.ReceiverSettings) || !sameTyped(x.ProxySettings, y.ProxySettings) {
+			return false
+		}
+	}
+	for i := range a.Outbound {
+		x, y := a.Outbound[i], b.Outbound[i]
+		if x.Tag != y.Tag || !sameTyped(x.SenderSettings, y.SenderSettings) || !sameTyped(x.ProxySettings, y.ProxySettings) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameTyped(a, b *serial.TypedMessage) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Type != b.Type {
+		return false
+	}
+	ma, err := a.GetInstance()
+	if err != nil {
+		return false
+	}
+	mb, err := b.GetInstance()
+	if err != nil {
+		return false
+	}
+	return proto.Equal(ma, mb)
+}
+
 func getCore(c *conf.Conf, infos []*panel.NodeInfo) (*core.Instance, error) {
 	config, err := BuildConfig(c, infos)
 	if err != nil {

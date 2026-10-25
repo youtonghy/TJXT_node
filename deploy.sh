@@ -54,13 +54,16 @@ usage() {
 TJXT_node 一键部署（TONG-ladder 节点）
 
 用法:
-  交互安装（依次询问面板地址和节点密钥）:
+  交互安装（依次询问面板地址和密钥）:
   curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh | sudo bash
 
   非交互安装:
-  sudo ./deploy.sh --api-host https://panel.example.com --api-key NODE_KEY
+  sudo ./deploy.sh --api-host https://panel.example.com --api-key MACHINE_KEY
   curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh \
-    | sudo bash -s -- --api-host URL --api-key NODE_KEY
+    | sudo bash -s -- --api-host URL --api-key MACHINE_KEY
+
+服务器密钥（面板“服务器”页面）只需配对一次：之后在面板中分配给该服务器的节点
+都会自动同步到本机。节点自己的密钥仍可用于单独配对一个节点。
 
 面板地址可以只写域名，或直接粘贴后台页面地址；脚本会补全 https://、去掉页面路径，
 并向面板校验后使用可用的地址。
@@ -75,7 +78,7 @@ TJXT_node 一键部署（TONG-ladder 节点）
 
 选项:
   --api-host URL            面板地址，例如 https://panel.example.com
-  --api-key KEY             节点自己的密钥（X-Server-Token），面板据此识别节点
+  --api-key KEY             服务器密钥或节点自己的密钥（X-Server-Token），面板据此识别
   --node-id N               可选：面板节点 ID（旧的全局密钥需要它；给出时写入配置并校验）
   --protocol auto|v3ui|v1   对接协议，默认 auto
   --version TAG             Release 版本，默认 latest
@@ -86,7 +89,7 @@ TJXT_node 一键部署（TONG-ladder 节点）
   --prefix DIR              安装目录，默认 /usr/local/tjxt-node
   --config-dir DIR          配置目录，默认 /etc/tjxt-node
   --force-config            覆盖已有配置（新配置先经 tjxt-node pair 校验）
-  --node-action MODE        已有配置时选择 replace 或 append（默认交互询问）
+  --node-action MODE        已有配置时选择 replace 或 append（交互时询问，非交互默认 append）
   --no-start                安装后不启动服务
   --yes                     卸载时跳过确认
   --purge                   卸载时同时删除配置和日志
@@ -441,13 +444,13 @@ ask_api_host() {
 ask_api_key() {
   local ans
   while true; do
-    ask ans "节点密钥（面板节点列表中该节点的密钥，输入不显示）: " -s
+    ask ans "服务器密钥或节点密钥（面板“服务器”或节点列表中的密钥，输入不显示）: " -s
     ans="${ans//[[:space:]]/}"
     if [[ -n "$ans" ]]; then
       API_KEY=$ans
       return
     fi
-    warn "节点密钥不能为空"
+    warn "密钥不能为空"
   done
 }
 
@@ -460,14 +463,17 @@ prompt_install_fields() {
   if [[ -f "$cfg" && "$FORCE_CONFIG" -eq 0 && -z "$NODE_ACTION" ]]; then
     if can_prompt; then
       printf '检测到已有配置 %s。\n' "$cfg"
-      ask ans "选择 [a] 追加新节点 / [r] 替换节点配置（默认追加）: "
+      ask ans "选择 [a] 追加（保留已有节点）/ [r] 替换已有配置（默认追加）: "
       case "${ans,,}" in
         ""|a|append) NODE_ACTION=append ;;
         r|replace) NODE_ACTION=replace ;;
         *) die "无效选择，未更改配置" ;;
       esac
     elif [[ -n "$API_KEY" ]]; then
-      die "检测到已有配置；请指定 --node-action append 或 --node-action replace"
+      # Appending never drops what runs already: a machine key joins the
+      # existing nodes, a node key is added unless it is configured already.
+      log "检测到已有配置 $cfg，追加新密钥（如需替换，请指定 --node-action replace）"
+      NODE_ACTION=append
     elif [[ -n "$API_HOST" ]] && ! can_prompt; then
       die "检测到已有配置；如需配置新节点，请提供 --api-key 和 --node-action append|replace"
     else
@@ -537,7 +543,7 @@ verify_panel() {
   done
   case "$rc" in
     3) err "无法连接面板，请检查地址、端口、DNS 和本机网络" ;;
-    4) err "面板拒绝了密钥：请在面板节点列表中复制该节点的密钥（可能已重置）" ;;
+    4) err "面板拒绝了密钥：请在面板“服务器”页面或节点列表中复制密钥（可能已重置）" ;;
     5) err "这是全局通讯密钥，不是节点自己的密钥；请改用面板节点列表中该节点的密钥" ;;
     7) err "该地址不是面板的节点接口：请确认地址是面板地址（不是订阅或节点地址）" ;;
     8) err "面板已响应，但该节点的配置无法使用（原因见上）：请升级 tjxt-node，或检查面板中该节点的设置" ;;
@@ -548,7 +554,21 @@ verify_panel() {
 
 # show_pair_info prints what the panel reported for the key.
 show_pair_info() {
-  local id type name addr
+  local id type name addr machine
+  machine="$(sed -nE 's/^Key belongs to machine ([0-9]+).*/\1/p' <<<"$PAIR_INFO")"
+  if [[ -n "$machine" ]]; then
+    name="$(sed -nE 's/^Key belongs to machine [0-9]+ \(name "(.*)"\)$/\1/p' <<<"$PAIR_INFO")"
+    printf "\n${green}面板校验通过，这是服务器密钥:${plain}\n"
+    printf '  面板地址: %s\n' "$API_HOST"
+    printf '  服务器密钥: %s\n' "$(mask_key "$API_KEY")"
+    printf '  服务器 ID: %s\n' "$machine"
+    [[ -n "$name" ]] && printf '  服务器名称: %s\n' "$name"
+    printf '  当前节点: %s 个（之后在面板中增删节点会自动同步）\n' \
+      "$(sed -nE 's/^Machine runs ([0-9]+) nodes$/\1/p' <<<"$PAIR_INFO")"
+    sed -nE 's/^Machine node ([0-9]+) \(type ([^,]*), name "(.*)"\)$/    #\1 \3 (\2)/p' <<<"$PAIR_INFO"
+    printf '  对接协议: %s\n\n' "$PROTOCOL"
+    return
+  fi
   id="$(sed -nE 's/^Key belongs to node ([0-9]+).*/\1/p' <<<"$PAIR_INFO")"
   type="$(sed -nE 's/^Key belongs to node [0-9]+ \(type ([^,)]*).*/\1/p' <<<"$PAIR_INFO")"
   name="$(sed -nE 's/^Key belongs to node .*, name "(.*)"\)$/\1/p' <<<"$PAIR_INFO")"
@@ -579,7 +599,7 @@ confirm_panel() {
     if ((rc == 0)); then
       show_pair_info
       ((PROMPTED)) || return 0
-      ask ans "确认使用该节点并完成安装？[Y/n] "
+      ask ans "确认使用该密钥并完成安装？[Y/n] "
       [[ "$ans" =~ ^[Nn] ]] || return 0
     elif ((!PROMPTED)); then
       die "面板校验失败（原因见上），未写入配置，服务未启动"

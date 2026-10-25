@@ -10,7 +10,9 @@ Fallback: `/api/v2/server/config` and `/api/v1/server/UniProxy/{user,push,alive,
 
 Set `Protocol` to `auto` (default), `v3ui`, or `v1`.
 
-Authenticate with `X-Server-Token: <per-node server_key>` only; the key is never put in URLs or bodies. Do not use a user or admin session token.
+Authenticate with `X-Server-Token: <machine key or per-node server_key>` only; the key is never put in URLs or bodies. Do not use a user or admin session token.
+
+- **Machine pairing.** A machine key (from the panel's machine list) pairs the whole server once. The agent polls `GET /api/v1/server/UniProxy/machine` (v3 endpoint `server/UniProxy/machine`, with ETag) for `{machine_id, name, pull_interval, nodes:[{id, name, protocol}]}` and runs every listed node; each node's config, users, traffic and online IPs use the same machine key with that node's `node_id`, which the panel accepts for the machine's nodes only. When the panel adds a node to the machine or removes one, the agent starts or stops just that node within `pull_interval` (the smallest of the machine's nodes, default 60 s), without restarting the Xray core, as long as the core's outbounds and routing stay the same; otherwise (new routes or egress rules) it reloads every node. A failed or rejected poll keeps the running nodes. A panel without the machine endpoint (HTTP 404) is reported as not supporting machine pairing.
 
 - **Pairing by key.** A node without `NodeID` sends no `node_id`/`server_id`; the panel finds the node from its own key and reports it as `base_config.node_id` (the top-level `id` is not trusted). That id is used for tags, certificate file names and logs; requests keep identifying the node by its key. If the answer has no `base_config.node_id`, the key is the fleet-wide server token and the node fails with "this key is not a node pairing key". A configured `NodeID` is still sent, and a different `base_config.node_id` is an error.
 - A rejected key is HTTP 401/403 or any answer whose body has `"error_code": "node_unauthorized"` (the panel uses 400). It is logged as a possibly rotated key and retried; traffic batches are kept, not dropped.
@@ -32,28 +34,36 @@ Authenticate with `X-Server-Token: <per-node server_key>` only; the key is never
 ```json
 {
   "Log": { "Level": "info", "Output": "", "Access": "none" },
-  "Nodes": [
-    {
-      "ApiHost": "http://127.0.0.1:3000",
-      "ApiKey": "this-node-own-key",
-      "Protocol": "auto",
-      "Timeout": 15
-    }
-  ]
+  "Machine": {
+    "ApiHost": "http://127.0.0.1:3000",
+    "ApiKey": "this-machine-key",
+    "Protocol": "auto",
+    "Timeout": 15
+  }
 }
 ```
 
-`ApiHost` and `ApiKey` are required. `NodeID` is optional: leave it out (or 0) to pair by key, which needs the node's own key from the panel's node list. Old configs with `NodeID` (including ones using the global server token) work unchanged.
+`Machine` pairs the server once; the nodes come from the panel. Nodes can also be configured one by one, alone or next to the machine (a node in both runs once, as the machine's):
 
-Environment variables, e.g. for Docker: when `TJXT_API_HOST` and `TJXT_API_KEY` are both set they **replace** the file's `Nodes` with that one node (`TJXT_NODE_ID` optional, timeout 15 s, protocol `auto`). The file's other settings (`Log`, `PprofPort`) still apply, and the file may be missing. Setting only one of the two, or `TJXT_NODE_ID` alone, is an error.
+```json
+"Nodes": [
+  { "ApiHost": "http://127.0.0.1:3000", "ApiKey": "this-node-own-key", "Protocol": "auto", "Timeout": 15 }
+]
+```
+
+The config needs a `Machine` or at least one node. `ApiHost` and `ApiKey` are required. `NodeID` is optional: leave it out (or 0) to pair by key, which needs the node's own key from the panel's node list. Old configs with `NodeID` (including ones using the global server token) work unchanged.
+
+Environment variables, e.g. for Docker: when `TJXT_API_HOST` and `TJXT_API_KEY` are both set they **replace** the file's `Nodes` with that one node (`TJXT_NODE_ID` optional, timeout 15 s, protocol `auto`). The file's other settings (`Log`, `PprofPort`) still apply, and the file may be missing. Setting only one of the two, or `TJXT_NODE_ID` alone, is an error. `TJXT_API_HOST` with `TJXT_MACHINE_KEY` instead sets the `Machine` and clears the file's `Nodes`; it cannot be combined with `TJXT_API_KEY` or `TJXT_NODE_ID`.
 
 ### Pairing
 
 ```bash
-TJXT_API_KEY='this-node-own-key' tjxt-node pair --api-host https://panel.example.com
+TJXT_API_KEY='this-machine-or-node-key' tjxt-node pair --api-host https://panel.example.com
 ```
 
-`pair` fetches the node config with the key, prints the node id, type, name and address (`host:port`, or the port when the panel sets no host), and writes `-c` (default `/etc/tjxt-node/config.json`) with that single node and its `NodeID`. An existing config keeps its other settings (`Log`, `PprofPort`, ...) and its `Nodes` are replaced; a config with several nodes, or one that does not parse, is only replaced with `--force`. The file is written atomically with mode 0600 (directory 0750). Other flags: `--key` (default `$TJXT_API_KEY`; the environment keeps the key out of the process list), `--protocol auto|v3ui|v1`, `--timeout 15`, `--node-id N` (check a legacy key against a known id), `--dry-run` (check only, write nothing). The key is never printed.
+Without `--node-id`, `pair` first asks the machine endpoint. A machine key prints the machine id, name and its nodes (`Key belongs to machine N (name "...")`, `Machine runs N nodes`, `Machine node ID (type T, name "...")`) and writes `Machine` into `-c`: nodes of `Nodes` the machine runs (same panel, a listed id, or the machine key itself) are dropped; with `--append` the other nodes stay, otherwise `Nodes` is removed (several nodes need `--force`). Any other key is paired as a node key, as below.
+
+For a node key, `pair` fetches the node config with the key, prints the node id, type, name and address (`host:port`, or the port when the panel sets no host), and writes `-c` (default `/etc/tjxt-node/config.json`) with that single node and its `NodeID`. An existing config keeps its other settings (`Log`, `PprofPort`, ...) and its `Nodes` are replaced; a config with several nodes, or one that does not parse, is only replaced with `--force`. The file is written atomically with mode 0600 (directory 0750). Other flags: `--key` (default `$TJXT_API_KEY`; the environment keeps the key out of the process list), `--protocol auto|v3ui|v1`, `--timeout 15`, `--node-id N` (check a legacy key against a known id), `--dry-run` (check only, write nothing). The key is never printed.
 
 Exit codes: 0 paired, 1 other panel error, 2 invalid flags or URL, 3 panel unreachable, 4 key rejected, 5 global server token instead of a node key, 6 config not written, 7 the address does not serve the node API (HTTP 404 or a non-JSON reply), 8 the panel's config for this node cannot be used (a field this version cannot read, or an unsupported protocol).
 
@@ -63,25 +73,27 @@ Only a config file that does not load or validate stops `tjxt-node server` (exit
 
 ## Deploy
 
-VPS 一键安装（systemd / OpenRC）：下载最新 Release 的二进制和 `deploy.sh`，按 `SHA256SUMS` 校验后安装，写入 `/etc/tjxt-node/config.json`，并把服务设为开机自启后启动。只需面板地址和该节点自己的密钥，节点 ID 由面板根据密钥识别。
+VPS 一键安装（systemd / OpenRC）：下载最新 Release 的二进制和 `deploy.sh`，按 `SHA256SUMS` 校验后安装，写入 `/etc/tjxt-node/config.json`，并把服务设为开机自启后启动。只需面板地址和密钥：推荐使用面板“服务器”页面的服务器密钥，一台服务器只配对一次，之后在面板中给该服务器增删节点会自动同步，无需再登录服务器；也可以用节点自己的密钥单独配对一个节点，节点 ID 由面板根据密钥识别。
 
-交互安装：不带参数运行，脚本依次询问面板地址和节点密钥（密钥输入不显示）。
+交互安装：不带参数运行，脚本依次询问面板地址和密钥（密钥输入不显示）。
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh | sudo bash
 ```
 
 - 面板地址可以只写域名（`panel.example.com`），也可以直接粘贴后台页面地址；脚本会去掉空白、引号、`?`/`#` 之后的部分、`/api/...` 和末尾的 `/`，没写协议时补 `https://`。校验时依次尝试该地址、去掉页面路径后的地址，以及（没写协议时）对应的 `http://` 地址，并使用第一个能通过校验的地址。
-- 校验通过后会显示面板返回的节点信息（面板地址、打码的密钥、节点 ID、类型、名称和地址），确认后才写配置并启动服务；校验失败会说明原因（连不上面板、密钥被拒、填了全局密钥）并允许重新填写。
+- 校验通过后会显示面板返回的信息（服务器密钥：服务器 ID、名称和当前节点；节点密钥：节点 ID、类型、名称和地址），确认后才写配置并启动服务；校验失败会说明原因（连不上面板、密钥被拒、填了全局密钥）并允许重新填写。
 - 安装结束时会显示开机自启和运行状态。
-- 已有配置时会询问是否重新填写；否则保留原配置。
+- 已有配置时会询问追加（保留已有节点）还是替换；不填密钥则保留原配置。
 
-非交互安装：面板后台节点列表的“安装命令”会生成这样的命令，校验后直接显示节点信息并完成安装：
+非交互安装：面板后台“服务器”页面（或节点列表）的“安装命令”会生成这样的命令，校验后直接显示信息并完成安装：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/youtonghy/TJXT_node/main/deploy.sh \
-  | sudo bash -s -- --api-host https://panel.example.com --api-key 'this-node-own-key'
+  | sudo bash -s -- --api-host https://panel.example.com --api-key 'this-machine-key'
 ```
+
+- 已有配置且给了密钥时，非交互安装默认追加（`--node-action append`）：服务器密钥会加入配置并去掉它已接管的节点，节点密钥会追加为新节点；需要清空旧配置时指定 `--node-action replace`。
 
 - 新装或 `--force-config` 时，脚本先用 `tjxt-node pair` 向面板校验地址和密钥，并把面板报告的节点 ID 写入配置；校验失败会打印原因，不写配置、不启动服务。已有配置保持不变。
 - `--node-id N` 仍可用（旧的全局密钥需要它），给出时会写入配置并与面板核对。

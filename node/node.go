@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -315,4 +316,92 @@ func (n *Node) Close() error {
 	}
 	n.controllers = nil
 	return errors.Join(errs...)
+}
+
+// Apply moves the running generation to the node set configs without
+// restarting the core: nodes no longer listed are stopped and new ones are
+// fetched and started. It only does so when that keeps the core's config
+// (outbounds, routing, DNS) unchanged and no node is pending; otherwise, or
+// when a new node's config cannot be fetched, it changes nothing and returns
+// false, and the caller reloads the whole configuration instead. An error
+// means nodes were changed but a new one failed to start; a reload repairs it.
+func (n *Node) Apply(c *conf.Conf, configs []conf.NodeConfig, x *core.V2Core) (bool, error) {
+	if len(n.pending) > 0 {
+		return false, nil
+	}
+	keep := make([]bool, len(n.Configs))
+	var added []conf.NodeConfig
+	for _, nc := range configs {
+		found := false
+		for i := range n.Configs {
+			if !keep[i] && sameNode(n.Configs[i], nc) {
+				keep[i], found = true, true
+				break
+			}
+		}
+		if !found {
+			added = append(added, nc)
+		}
+	}
+	if len(added) == 0 && !slices.Contains(keep, false) {
+		return true, nil
+	}
+	type fetched struct {
+		client *panel.Client
+		info   *panel.NodeInfo
+	}
+	fresh := make([]fetched, len(added))
+	for i := range added {
+		client, info, err := fetchNode(context.Background(), &added[i])
+		if err != nil {
+			log.WithFields(nodeFields(added[i], err)).Warn("Cannot fetch the config of a new node, reloading all nodes instead")
+			return false, nil
+		}
+		fresh[i] = fetched{client: client, info: info}
+	}
+	var running, next []*panel.NodeInfo
+	for i := range n.Configs {
+		info := n.currentInfo(i)
+		running = append(running, info)
+		if keep[i] {
+			next = append(next, info)
+		}
+	}
+	for _, f := range fresh {
+		next = append(next, f.info)
+	}
+	same, err := core.SameConfig(c, running, next)
+	if err != nil || !same {
+		// New routes, outbounds or egress rules need a new core.
+		return false, nil
+	}
+
+	again := &Node{}
+	var errs []error
+	for i := range n.Configs {
+		if keep[i] {
+			again.Configs = append(again.Configs, n.Configs[i])
+			again.NodeInfos = append(again.NodeInfos, n.NodeInfos[i])
+			again.controllers = append(again.controllers, n.controllers[i])
+			continue
+		}
+		log.WithFields(nodeFields(n.Configs[i], nil)).Info("Node removed from the panel's list, stopping it")
+		if err := n.controllers[i].Close(); err != nil {
+			errs = append(errs, fmt.Errorf("stop node %d: %w", n.Configs[i].NodeID, err))
+		}
+	}
+	for i, f := range fresh {
+		nc := added[i]
+		controller := NewController(f.client, &nc, f.info)
+		if err := controller.Start(x); err != nil {
+			errs = append(errs, fmt.Errorf("start node %d: %w", nc.NodeID, err))
+			continue
+		}
+		log.WithFields(nodeFields(nc, nil)).Info("Node added by the panel, started")
+		again.Configs = append(again.Configs, nc)
+		again.NodeInfos = append(again.NodeInfos, f.info)
+		again.controllers = append(again.controllers, controller)
+	}
+	n.Configs, n.NodeInfos, n.controllers = again.Configs, again.NodeInfos, again.controllers
+	return true, errors.Join(errs...)
 }

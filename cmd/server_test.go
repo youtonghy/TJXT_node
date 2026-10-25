@@ -21,7 +21,7 @@ func TestStartWithoutAnyNodeConfig(t *testing.T) {
 	c := conf.New()
 	c.LogConfig.Level = "error"
 	c.NodeConfigs = []conf.NodeConfig{{APIHost: s.URL, NodeID: 1, Key: "k", Timeout: 5, RetryCount: &retry, Protocol: "v1"}}
-	p, err := prepareConf(c, nil)
+	p, err := prepareConf(c, c.NodeConfigs, nil)
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}

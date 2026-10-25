@@ -44,14 +44,21 @@ var pairOpts pairOptions
 
 var pairCommand = cobra.Command{
 	Use:   "pair",
-	Short: "Pair with a panel node by its key and write the config",
-	Long: `Fetch the node config with the node's own key, show which panel node the
-key belongs to, and write a config file with that single node.
+	Short: "Pair with a panel machine or node by its key and write the config",
+	Long: `Check the key with the panel and write the config.
 
-An existing config keeps its other settings (Log, PprofPort, ...); its Nodes
-are replaced by the paired node. --append keeps existing nodes and adds this
-one. A config with several nodes is only replaced with --force. --dry-run
-checks the key without writing anything.
+A machine key (from the panel's machine list) pairs the whole server: the
+config gets a Machine entry, and the agent then runs every node the panel
+assigns to that machine. Nodes the machine runs are dropped from Nodes; with
+--append the other nodes stay, otherwise Nodes is removed.
+
+A node key fetches that node's config, shows which panel node it belongs to,
+and writes a config with that single node; --append adds it to the existing
+nodes instead.
+
+An existing config keeps its other settings (Log, PprofPort, ...). A config
+with several nodes is only replaced with --force. --dry-run checks the key
+without writing anything.
 
 --api-host and --key default to TJXT_API_HOST and TJXT_API_KEY; prefer the
 environment for the key so it does not show up in the process list.
@@ -127,6 +134,13 @@ func runPair(ctx context.Context, o pairOptions, out io.Writer) error {
 		Protocol:   o.Protocol,
 	}
 	fmt.Fprintf(out, "Pairing with %s using key %s\n", host, maskKey(nc.Key))
+	if o.NodeID == 0 {
+		// A machine key pairs the whole server; any other key is a node key.
+		paired, err := pairMachine(ctx, o, host, nc, out)
+		if paired || err != nil {
+			return err
+		}
+	}
 	client, err := panel.New(&nc)
 	if err != nil {
 		return pairFail(exitPairFailed, "create panel client: %v", err)
@@ -187,6 +201,47 @@ func runPair(ctx context.Context, o pairOptions, out io.Writer) error {
 		fmt.Fprintf(out, "Wrote %s with node %d\n", o.ConfigPath, info.Id)
 	}
 	return nil
+}
+
+// pairMachine pairs with the key as a machine key. It reports false (and no
+// error) when the panel does not take the key as one, e.g. a node key or a
+// panel without machines, so the caller pairs it as a node key.
+func pairMachine(ctx context.Context, o pairOptions, host string, nc conf.NodeConfig, out io.Writer) (bool, error) {
+	mc := conf.MachineConfig{APIHost: host, Key: nc.Key, Timeout: nc.Timeout, RetryCount: nc.RetryCount, Protocol: nc.Protocol}
+	client, err := panel.New(new(mc.Client()))
+	if err != nil {
+		return false, pairFail(exitPairFailed, "create panel client: %v", err)
+	}
+	info, err := client.GetMachine(ctx)
+	if err != nil {
+		var exit *exitError
+		if errors.As(classifyPairError(host, err), &exit) && exit.code == exitPairUnreachable {
+			return false, classifyPairError(host, err)
+		}
+		return false, nil
+	}
+	if info == nil {
+		return false, nil
+	}
+	fmt.Fprintf(out, "Key belongs to machine %d", info.ID)
+	if info.Name != "" {
+		fmt.Fprintf(out, " (name %q)", info.Name)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Machine runs %d nodes\n", len(info.Nodes))
+	for _, n := range info.Nodes {
+		fmt.Fprintf(out, "Machine node %d (type %s, name %q)\n", n.ID, n.Protocol, n.Name)
+	}
+	if o.DryRun {
+		fmt.Fprintf(out, "Dry run: %s not written\n", o.ConfigPath)
+		return true, nil
+	}
+	mc.RetryCount = nil
+	if err := conf.WriteMachine(o.ConfigPath, mc, info.NodeIDs(), o.Append, o.Force); err != nil {
+		return true, pairFail(exitPairConfig, "write config: %v", err)
+	}
+	fmt.Fprintf(out, "Wrote %s with machine %d\n", o.ConfigPath, info.ID)
+	return true, nil
 }
 
 // validatePanelURL accepts an http(s) URL with a host and returns it without
