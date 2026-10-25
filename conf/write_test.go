@@ -69,6 +69,17 @@ func TestAppendNodePreservesExistingNodesAndSettings(t *testing.T) {
 	}
 }
 
+func TestMatchesNodeReadsJSONWithoutJSONExtension(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json.pairing")
+	if err := os.WriteFile(path, []byte(`{"Nodes":[{"ApiHost":"http://old","ApiKey":"old-key","NodeID":1}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := MatchesNode(path, NodeConfig{APIHost: "http://old", Key: "old-key", NodeID: 1})
+	if err != nil || !ok {
+		t.Fatalf("want match, got %v, %v", ok, err)
+	}
+}
+
 func TestAppendNodeRejectsDuplicate(t *testing.T) {
 	path := writeConfig(t, `{"Nodes":[{"ApiHost":"http://old","ApiKey":"old-key","NodeID":1}]}`)
 	n := NodeConfig{APIHost: "http://old", Key: "old-key", NodeID: 1}

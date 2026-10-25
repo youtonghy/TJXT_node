@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -87,6 +89,11 @@ func (p *Conf) loadFile(filePath string) error {
 	}
 	v := viper.New()
 	v.SetConfigFile(filePath)
+	// A file without a known extension (such as config.json.pairing, the
+	// temporary copy older installers pair) is read as JSON.
+	if ext := strings.TrimPrefix(filepath.Ext(filePath), "."); !slices.Contains(viper.SupportedExts, ext) {
+		v.SetConfigType("json")
+	}
 	if err := v.ReadInConfig(); err != nil {
 		return fmt.Errorf("read config file error: %s", err)
 	}

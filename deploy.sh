@@ -620,7 +620,7 @@ write_config() {
   proto="$(json_escape "$PROTOCOL")"
   logf="$(json_escape "$(log_path)")"
   [[ -n "$NODE_ID" ]] && node_id_line="\"NodeID\": ${NODE_ID},"
-  tmp="${cfg}.pairing"
+  tmp="${cfg%.json}.pairing.json"
   umask 077
   if [[ "$NODE_ACTION" == "append" ]]; then
     cp -p "$cfg" "$tmp"
