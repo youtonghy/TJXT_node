@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/youtonghy/TJXT_node/common/counter"
+	"github.com/youtonghy/TJXT_node/common/format"
 	"github.com/youtonghy/TJXT_node/common/rate"
 	"github.com/youtonghy/TJXT_node/limiter"
 
@@ -148,6 +149,15 @@ func (*DefaultDispatcher) Close() error { return nil }
 
 // trafficCounter returns the counter of an inbound, creating it atomically so
 // concurrent first connections cannot install two counters and lose traffic.
+// userNodeTag is the node a user belongs to: the tag in its email, which differs
+// from the inbound's for the lines of a shared inbound, else the inbound's tag.
+func userNodeTag(email, inboundTag string) string {
+	if tag := format.NodeTagOf(email); tag != "" {
+		return tag
+	}
+	return inboundTag
+}
+
 func (d *DefaultDispatcher) trafficCounter(tag string) *counter.TrafficCounter {
 	if c, ok := d.Counter.Load(tag); ok {
 		return c.(*counter.TrafficCounter)
@@ -180,14 +190,15 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	var limit *limiter.Limiter
 	var err error
 	if user != nil && len(user.Email) > 0 {
-		limit, err = limiter.GetLimiter(sessionInbound.Tag)
+		nodeTag := userNodeTag(user.Email, sessionInbound.Tag)
+		limit, err = limiter.GetLimiter(nodeTag)
 		if err != nil {
-			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " error: ", err)
+			errors.LogInfo(ctx, "get limiter ", nodeTag, " error: ", err)
 			common.Close(outboundLink.Writer)
 			common.Close(inboundLink.Writer)
 			common.Interrupt(outboundLink.Reader)
 			common.Interrupt(inboundLink.Reader)
-			return nil, nil, nil, errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
+			return nil, nil, nil, errors.New("get limiter ", nodeTag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
 		w, reject := limit.CheckLimit(user.Email,
@@ -226,7 +237,7 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 			sessionInbound.Source.Network == net.Network_TCP)
 		inboundLink.Writer = withActivity(inboundLink.Writer, activity)
 		outboundLink.Writer = withActivity(outboundLink.Writer, activity)
-		t := d.trafficCounter(sessionInbound.Tag)
+		t := d.trafficCounter(nodeTag)
 
 		ts := t.GetCounter(user.Email)
 		upcounter := &counter.XrayTrafficCounter{V: &ts.UpCounter}
@@ -365,12 +376,13 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 	var limit *limiter.Limiter
 	var err error
 	if user != nil && len(user.Email) > 0 {
-		limit, err = limiter.GetLimiter(sessionInbound.Tag)
+		nodeTag := userNodeTag(user.Email, sessionInbound.Tag)
+		limit, err = limiter.GetLimiter(nodeTag)
 		if err != nil {
-			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " error: ", err)
+			errors.LogInfo(ctx, "get limiter ", nodeTag, " error: ", err)
 			common.Close(outbound.Writer)
 			common.Interrupt(outbound.Reader)
-			return errors.New("get limiter ", sessionInbound.Tag, " error: ", err)
+			return errors.New("get limiter ", nodeTag, " error: ", err)
 		}
 		// Speed Limit and Device Limit
 		w, reject := limit.CheckLimit(user.Email,
@@ -403,7 +415,7 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 		outbound.Writer = withActivity(outbound.Writer, limit.Activity(user.Email,
 			sessionInbound.Source.Address.IP().String(),
 			sessionInbound.Source.Network == net.Network_TCP))
-		t := d.trafficCounter(sessionInbound.Tag)
+		t := d.trafficCounter(nodeTag)
 
 		ts := t.GetCounter(user.Email)
 		downcounter := &counter.XrayTrafficCounter{V: &ts.DownCounter}

@@ -37,7 +37,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	}
 	cancel()
 	c.startTask(c.userReportPeriodic, false)
-	if node.Security == panel.Tls {
+	if node.Security == panel.Tls && !node.Shared() {
 		switch c.nodeInfo().Common.CertInfo.CertMode {
 		case "none", "", "file", "self":
 		default:

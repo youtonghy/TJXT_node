@@ -27,7 +27,25 @@ type NodeInfo struct {
 	PushInterval time.Duration
 	PullInterval time.Duration
 	Tag          string
-	Common       *CommonNode
+	// InboundTag is the Xray inbound the node's users join: its own Tag, or for a
+	// node that shares another node's inbound (SharedInbound) that node's tag.
+	InboundTag string
+	// SharedInbound is the id of the node whose inbound this node shares, 0 if none.
+	SharedInbound int
+	Common        *CommonNode
+}
+
+// Inbound returns the tag of the Xray inbound the node's users join.
+func (n *NodeInfo) Inbound() string {
+	if n.InboundTag != "" {
+		return n.InboundTag
+	}
+	return n.Tag
+}
+
+// Shared reports whether the node is a line of another node's inbound.
+func (n *NodeInfo) Shared() bool {
+	return n.SharedInbound > 0 && n.Inbound() != n.Tag
 }
 
 type CommonNode struct {
@@ -38,6 +56,9 @@ type CommonNode struct {
 	ServerPort int         `json:"server_port"`
 	Routes     []Route     `json:"routes"`
 	BaseConfig *BaseConfig `json:"base_config"`
+	// SharedInbound is the node whose inbound (port, protocol, transport,
+	// TLS/REALITY) this node shares; its users get their own credentials there.
+	SharedInbound int `json:"shared_inbound"`
 	//vless vmess trojan
 	Tls                  int         `json:"tls"`
 	TlsSettings          TlsSettings `json:"tls_settings"`
@@ -267,13 +288,21 @@ func parseNodeInfo(c *Client, body []byte) (*NodeInfo, error) {
 		return nil, &NodeConfigError{err}
 	}
 	node.Tag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, node.Id)
+	node.InboundTag = node.Tag
+	// The inbound and its certificate belong to the node that owns them.
+	inboundID := node.Id
+	if cm.SharedInbound > 0 && cm.SharedInbound != node.Id {
+		node.SharedInbound = cm.SharedInbound
+		inboundID = cm.SharedInbound
+		node.InboundTag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, inboundID)
+	}
 	cf := cm.TlsSettings.CertFile
 	kf := cm.TlsSettings.KeyFile
 	if cf == "" {
-		cf = filepath.Join("/etc/tjxt-node/", cm.Protocol+strconv.Itoa(node.Id)+".cer")
+		cf = filepath.Join("/etc/tjxt-node/", cm.Protocol+strconv.Itoa(inboundID)+".cer")
 	}
 	if kf == "" {
-		kf = filepath.Join("/etc/tjxt-node/", cm.Protocol+strconv.Itoa(node.Id)+".key")
+		kf = filepath.Join("/etc/tjxt-node/", cm.Protocol+strconv.Itoa(inboundID)+".key")
 	}
 	certDomain := cm.TlsSettings.PrimaryServerName()
 	if certDomain == "" {

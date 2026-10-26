@@ -67,7 +67,19 @@ func (c *Controller) renewCertTask(_ context.Context) error {
 }
 
 func (c *Controller) requestCert() error {
-	cert := c.nodeInfo().Common.CertInfo
+	info := c.nodeInfo()
+	cert := info.Common.CertInfo
+	if info.Shared() {
+		// A line uses the certificate of the node whose inbound it shares; that
+		// node creates and renews it.
+		switch cert.CertMode {
+		case "dns", "http", "self":
+			if !file.IsExist(cert.CertFile) || !file.IsExist(cert.KeyFile) {
+				return fmt.Errorf("waiting for the certificate of the shared inbound %s", info.Inbound())
+			}
+			return nil
+		}
+	}
 	switch cert.CertMode {
 	case "none", "":
 	case "file":

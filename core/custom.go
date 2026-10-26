@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -61,6 +62,52 @@ func privateEgressPolicy(infos []*panel.NodeInfo) (allowAll bool, allowTags []st
 		return true, nil
 	}
 	return false, allowTags
+}
+
+// nodeBinding selects one node's traffic in routing rules: by its inbound, or
+// for the nodes of a shared inbound (whose users share one Xray inbound) by its
+// users, whose emails start with the node tag.
+type nodeBinding struct {
+	tag    string
+	byUser bool
+}
+
+// userPattern matches the emails of a node's users (format.UserTag).
+func userPattern(tag string) string {
+	return "regexp:^" + regexp.QuoteMeta(tag) + `\|`
+}
+
+func (b nodeBinding) bind(ruleMap map[string]json.RawMessage, logger *log.Entry) {
+	if !b.byUser {
+		raw, _ := json.Marshal(b.tag)
+		ruleMap["inboundTag"] = raw
+		return
+	}
+	if _, ok := ruleMap["user"]; ok {
+		logger.Warn("Route of a node sharing an inbound: its user match is replaced by the node's users")
+	}
+	raw, _ := json.Marshal([]string{userPattern(b.tag)})
+	ruleMap["user"] = raw
+}
+
+// nodeBindings returns how each node's rules select its traffic: by user for
+// the nodes of shared inbounds (the lines and the nodes they share), else by
+// inbound.
+func nodeBindings(infos []*panel.NodeInfo) map[string]nodeBinding {
+	sharedInbounds := map[string]bool{}
+	for _, info := range infos {
+		if info != nil && info.Shared() {
+			sharedInbounds[info.Inbound()] = true
+		}
+	}
+	bindings := make(map[string]nodeBinding, len(infos))
+	for _, info := range infos {
+		if info == nil {
+			continue
+		}
+		bindings[info.Tag] = nodeBinding{tag: info.Tag, byUser: info.Shared() || sharedInbounds[info.Tag]}
+	}
+	return bindings
 }
 
 // routingMatchKeys are the match fields supported by Xray's RawFieldRule.
@@ -127,6 +174,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 	}
 
 	blockPrivate := !allowAll
+	bindings := nodeBindings(infos)
 	for _, info := range infos {
 		if info == nil || info.Common == nil || len(info.Common.Routes) == 0 {
 			continue
@@ -135,7 +183,7 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 			coreDnsConfig.Servers,
 			coreOutboundConfig,
 			coreRouterConfig.RuleList,
-			info.Tag,
+			bindings[info.Tag],
 			info.Common.Routes,
 			blockPrivate,
 		)
@@ -146,16 +194,33 @@ func GetCustomConfig(infos []*panel.NodeInfo) (*dns.Config, []*core.OutboundHand
 			return nil, nil, nil, fmt.Errorf("build private egress outbound: %w", err)
 		}
 		coreOutboundConfig = append(coreOutboundConfig, allowOutbound)
-		// Appended last so the panel's routes keep precedence.
-		rawRule, err := json.Marshal(map[string]interface{}{
-			"inboundTag":  allowTags,
-			"network":     "tcp,udp",
-			"outboundTag": allowPrivateOutboundTag,
-		})
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("marshal private egress rule: %w", err)
+		// Appended last so the panel's routes keep precedence. Nodes of shared
+		// inbounds are selected by their users, the others by their inbound.
+		var inboundTags, users []string
+		for _, tag := range allowTags {
+			if bindings[tag].byUser {
+				users = append(users, userPattern(tag))
+			} else {
+				inboundTags = append(inboundTags, tag)
+			}
 		}
-		coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+		for _, match := range []struct {
+			key    string
+			values []string
+		}{{"inboundTag", inboundTags}, {"user", users}} {
+			if len(match.values) == 0 {
+				continue
+			}
+			rawRule, err := json.Marshal(map[string]interface{}{
+				match.key:     match.values,
+				"network":     "tcp,udp",
+				"outboundTag": allowPrivateOutboundTag,
+			})
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("marshal private egress rule: %w", err)
+			}
+			coreRouterConfig.RuleList = append(coreRouterConfig.RuleList, rawRule)
+		}
 	}
 	DnsConfig, err := coreDnsConfig.Build()
 	if err != nil {
@@ -180,7 +245,7 @@ func applyNodeRoutes(
 	dnsServers []*coreConf.NameServerConfig,
 	outbounds []*core.OutboundHandlerConfig,
 	rules []json.RawMessage,
-	inboundTag string,
+	node nodeBinding,
 	routes []panel.Route,
 	blockPrivate bool,
 ) ([]*coreConf.NameServerConfig, []*core.OutboundHandlerConfig, []json.RawMessage) {
@@ -197,7 +262,7 @@ func applyNodeRoutes(
 			outbounds,
 			pending,
 			referencedTags,
-			inboundTag,
+			node,
 			route.Id,
 			raw,
 			blockPrivate,
@@ -205,7 +270,7 @@ func applyNodeRoutes(
 	}
 
 	for _, item := range pending {
-		logger := log.WithFields(log.Fields{"tag": inboundTag, "route": item.routeID})
+		logger := log.WithFields(log.Fields{"tag": node.tag, "route": item.routeID})
 		if item.pureOutbound {
 			// A pure outbound object (no match fields) acts as a catch-all rule at its
 			// position unless another rule on this node explicitly routes to its tag.
@@ -314,12 +379,12 @@ func collectRouteItems(
 	outbounds []*core.OutboundHandlerConfig,
 	pending []pendingNodeRule,
 	referencedTags map[string]bool,
-	inboundTag string,
+	node nodeBinding,
 	routeID int,
 	raw json.RawMessage,
 	blockPrivate bool,
 ) ([]*coreConf.NameServerConfig, []*core.OutboundHandlerConfig, []pendingNodeRule) {
-	logger := log.WithFields(log.Fields{"tag": inboundTag, "route": routeID})
+	logger := log.WithFields(log.Fields{"tag": node.tag, "route": routeID})
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
 		return dnsServers, outbounds, pending
@@ -337,7 +402,7 @@ func collectRouteItems(
 				outbounds,
 				pending,
 				referencedTags,
-				inboundTag,
+				node,
 				routeID,
 				elem,
 				blockPrivate,
@@ -377,7 +442,7 @@ func collectRouteItems(
 		}
 		if rawRules, ok := obj["rules"]; ok {
 			dnsServers, outbounds, pending = collectRouteItems(
-				dnsServers, outbounds, pending, referencedTags, inboundTag, routeID, rawRules, blockPrivate,
+				dnsServers, outbounds, pending, referencedTags, node, routeID, rawRules, blockPrivate,
 			)
 		}
 		if rawRouting, ok := obj["routing"]; ok {
@@ -389,7 +454,7 @@ func collectRouteItems(
 			} else {
 				for _, r := range routingObj.Rules {
 					dnsServers, outbounds, pending = collectRouteItems(
-						dnsServers, outbounds, pending, referencedTags, inboundTag, routeID, r, blockPrivate,
+						dnsServers, outbounds, pending, referencedTags, node, routeID, r, blockPrivate,
 					)
 				}
 			}
@@ -429,8 +494,7 @@ func collectRouteItems(
 			ruleMap["outboundTag"] = tagBytes
 			referencedTags[targetTag] = true
 		}
-		inboundBytes, _ := json.Marshal(inboundTag)
-		ruleMap["inboundTag"] = inboundBytes
+		node.bind(ruleMap, logger)
 		pending = append(pending, pendingNodeRule{
 			routeID:        routeID,
 			ruleMap:        ruleMap,
@@ -474,9 +538,8 @@ func collectRouteItems(
 			netBytes, _ := json.Marshal("tcp,udp")
 			ruleMap["network"] = netBytes
 		}
-		inboundBytes, _ := json.Marshal(inboundTag)
 		tagBytes, _ := json.Marshal(tag)
-		ruleMap["inboundTag"] = inboundBytes
+		node.bind(ruleMap, logger)
 		ruleMap["outboundTag"] = tagBytes
 
 		pending = append(pending, pendingNodeRule{

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/youtonghy/TJXT_node/api/panel"
 	"github.com/youtonghy/TJXT_node/conf"
 	"github.com/youtonghy/TJXT_node/core"
 )
@@ -23,11 +24,13 @@ type machinePanel struct {
 	key     string
 	nodes   []int
 	configs map[int]map[string]any
+	// users are the users per node (testUsers(1) for nodes not listed).
+	users map[int][]panel.UserInfo
 }
 
 func newMachinePanel(t *testing.T) *machinePanel {
 	t.Helper()
-	p := &machinePanel{key: testMachineKey, configs: map[int]map[string]any{}}
+	p := &machinePanel{key: testMachineKey, configs: map[int]map[string]any{}, users: map[int][]panel.UserInfo{}}
 	p.Server = httptest.NewServer(http.HandlerFunc(p.serve))
 	t.Cleanup(p.Close)
 	return p
@@ -84,7 +87,11 @@ func (p *machinePanel) serve(w http.ResponseWriter, r *http.Request) {
 	case "/api/v2/server/config":
 		_ = json.NewEncoder(w).Encode(p.configs[id])
 	case "/api/v1/server/UniProxy/user":
-		_ = json.NewEncoder(w).Encode(map[string]any{"users": testUsers(1)})
+		users, ok := p.users[id]
+		if !ok {
+			users = testUsers(1)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"users": users})
 	case "/api/v1/server/UniProxy/alivelist":
 		_, _ = w.Write([]byte(`{"alive":{}}`))
 	case "/api/v1/server/UniProxy/alive", "/api/v1/server/UniProxy/push":

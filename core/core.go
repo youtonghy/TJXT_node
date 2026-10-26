@@ -21,17 +21,23 @@ import (
 )
 
 type AddUsersParams struct {
-	Tag   string
-	Users []panel.UserInfo
+	// Tag labels the users (their email) and their traffic and limits.
+	Tag string
+	// Inbound is the inbound the users join; empty means the inbound tagged Tag.
+	Inbound string
+	Users   []panel.UserInfo
 	*panel.NodeInfo
 }
 
 type V2Core struct {
-	Config     *conf.Conf
-	ReloadCh   chan struct{}
-	access     sync.Mutex
-	Server     *core.Instance
-	users      *UserMap
+	Config   *conf.Conf
+	ReloadCh chan struct{}
+	access   sync.Mutex
+	Server   *core.Instance
+	users    *UserMap
+	// shared holds the inbounds whose users belong to several nodes, by tag.
+	sharedMu   sync.Mutex
+	shared     map[string]*sharedInbound
 	ihm        inbound.Manager
 	ohm        outbound.Manager
 	dispatcher *dispatcher.DefaultDispatcher
@@ -76,6 +82,9 @@ func (v *V2Core) Close() error {
 	v.access.Lock()
 	defer v.access.Unlock()
 	v.Config = nil
+	v.sharedMu.Lock()
+	v.shared = nil
+	v.sharedMu.Unlock()
 	v.ihm = nil
 	v.ohm = nil
 	v.dispatcher = nil

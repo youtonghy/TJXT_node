@@ -23,6 +23,9 @@ var AgentFeatures = []string{
 	"revoked-users",
 	"device-activity",
 	"traffic-spool",
+	// Nodes may share another node's inbound (shared_inbound): one listener,
+	// per-node credentials, traffic and routes.
+	"shared-inbound",
 }
 
 // FeaturesHeader carries AgentFeatures, comma separated.

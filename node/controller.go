@@ -50,6 +50,15 @@ type Controller struct {
 	infoMu sync.RWMutex
 	// portHopApplied is set while the node's port hopping redirect may exist.
 	portHopApplied bool
+	// sharesInbound is set when the node's users join a shared inbound: it is a
+	// line of another node's inbound, or other nodes are lines of its inbound.
+	sharesInbound bool
+}
+
+// ownsInbound reports whether the node's inbound is its own (also when other
+// nodes share it); a line's inbound belongs to the node it shares.
+func (c *Controller) ownsInbound() bool {
+	return c.info.Inbound() == c.tag
 }
 
 // nodeInfo returns the node config currently applied.
@@ -247,6 +256,15 @@ func (c *Controller) reloadInbound(info *panel.NodeInfo) {
 	if info.Security == panel.Tls && certChanged {
 		c.certPending = true
 	}
+	if c.sharesInbound && !c.certPending {
+		// Rebuild the shared inbound with the new settings and every node's users.
+		if err := c.server.RebuildInbound(info.Inbound(), info); err != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Rebuilding the shared inbound failed, retrying on the next poll")
+			c.resetRuntime()
+		}
+		log.WithField("tag", c.tag).Info("Node config changed, rebuilding the shared inbound")
+		return
+	}
 	c.resetRuntime()
 	log.WithField("tag", c.tag).Info("Node config changed, rebuilding this inbound only")
 }
@@ -317,12 +335,22 @@ func (c *Controller) syncUsers() error {
 
 func (c *Controller) applyUserDiff(desired, deleted, added []panel.UserInfo) error {
 	running := len(c.userList) > 0
-	if len(deleted) > 0 && running {
+	if len(deleted) > 0 && running && !c.sharesInbound {
 		if err := c.server.DelUsers(deleted, c.tag, c.info); err != nil {
 			return fmt.Errorf("delete users error: %s", err)
 		}
 	}
 	switch {
+	case c.sharesInbound:
+		// The core adds and removes this node's users on the shared inbound and
+		// runs it while any of its nodes has users.
+		if err := c.server.SetInboundMember(c.info.Inbound(), c.tag, c.info, desired); err != nil {
+			return fmt.Errorf("update shared inbound error: %s", err)
+		}
+		if c.ownsInbound() {
+			c.syncPortHop(len(desired) > 0)
+		}
+		return nil
 	case len(desired) == 0:
 		if err := c.server.DelNode(c.tag); err != nil {
 			return fmt.Errorf("stop inbound error: %s", err)
@@ -377,6 +405,12 @@ func (c *Controller) resetRuntime() {
 func (c *Controller) stopRuntime() error {
 	if c.server == nil || c.info == nil {
 		return nil
+	}
+	if c.sharesInbound {
+		if c.ownsInbound() {
+			c.syncPortHop(false)
+		}
+		return c.server.SetInboundMember(c.info.Inbound(), c.tag, c.info, nil)
 	}
 	c.syncPortHop(false)
 	return c.server.DelNode(c.tag)

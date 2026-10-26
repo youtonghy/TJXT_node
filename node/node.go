@@ -103,6 +103,25 @@ func New(nodes []conf.NodeConfig, prev *Node) (*Node, error) {
 		n.NodeInfos = append(n.NodeInfos, r.info)
 		clients = append(clients, r.client)
 	}
+	// Two nodes that do not share an inbound cannot listen on the same port:
+	// Xray opens listeners with SO_REUSEPORT and would split connections
+	// between them. Only the first of them runs.
+	if dropped := portConflicts(n.NodeInfos); len(dropped) > 0 {
+		kept := n.NodeInfos[:0:0]
+		var keptConfigs []conf.NodeConfig
+		var keptClients []*panel.Client
+		for i, info := range n.NodeInfos {
+			if other, ok := dropped[i]; ok {
+				log.WithFields(nodeFields(n.Configs[i], nil)).WithField("conflicts_with", other).
+					Error("Node listens on the same port as another node it does not share an inbound with; it is not started. Change its port in the panel, or let it share that node's inbound")
+				continue
+			}
+			kept = append(kept, info)
+			keptConfigs = append(keptConfigs, n.Configs[i])
+			keptClients = append(keptClients, clients[i])
+		}
+		n.NodeInfos, n.Configs, clients = kept, keptConfigs, keptClients
+	}
 	// The controllers keep these clients: they hold the ETag and hash of the
 	// config just fetched, so the first poll does not see it as a change.
 	n.buildControllers(clients)
@@ -137,10 +156,24 @@ func (n *Node) Rebuild() (*Node, error) {
 }
 
 func (n *Node) buildControllers(clients []*panel.Client) {
+	sharing := sharedInbounds(n.NodeInfos)
 	n.controllers = make([]*Controller, len(n.Configs))
 	for i := range n.Configs {
 		n.controllers[i] = NewController(clients[i], &n.Configs[i], n.NodeInfos[i])
+		n.controllers[i].sharesInbound = sharing[n.NodeInfos[i].Inbound()]
 	}
+}
+
+// sharedInbounds returns the inbounds that lines share (by tag): their nodes,
+// the owner and the lines, join them through the core.
+func sharedInbounds(infos []*panel.NodeInfo) map[string]bool {
+	shared := map[string]bool{}
+	for _, info := range infos {
+		if info != nil && info.Shared() {
+			shared[info.Inbound()] = true
+		}
+	}
+	return shared
 }
 
 // Pending returns how many configured nodes wait for their panel config.
@@ -369,6 +402,22 @@ func (n *Node) Apply(c *conf.Conf, configs []conf.NodeConfig, x *core.V2Core) (b
 	}
 	for _, f := range fresh {
 		next = append(next, f.info)
+	}
+	// Lines change how the nodes of a shared inbound join it; the new
+	// generation sets that up.
+	for i, f := range fresh {
+		if f.info.Shared() || sharedInbounds(running)[f.info.Tag] {
+			log.WithFields(nodeFields(added[i], nil)).Info("A node sharing an inbound was added, reloading all nodes")
+			return false, nil
+		}
+	}
+	for i := range n.Configs {
+		if !keep[i] && n.controllers[i].sharesInbound {
+			return false, nil
+		}
+	}
+	if len(portConflicts(next)) > 0 {
+		return false, nil
 	}
 	same, err := core.SameConfig(c, running, next)
 	if err != nil || !same {

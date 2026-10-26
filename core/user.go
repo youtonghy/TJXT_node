@@ -122,7 +122,11 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	default:
 		return 0, fmt.Errorf("unsupported node type: %s", p.NodeInfo.Type)
 	}
-	man, err := v.GetUserManager(p.Tag)
+	inbound := p.Inbound
+	if inbound == "" {
+		inbound = p.Tag
+	}
+	man, err := v.GetUserManager(inbound)
 	if err != nil {
 		return 0, fmt.Errorf("get user manager error: %s", err)
 	}
