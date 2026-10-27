@@ -122,3 +122,43 @@ func TestCustomFreedomOutboundAllowsPrivateWhenNodeAllows(t *testing.T) {
 		t.Fatalf("expected an explicit allow-all rule, got %v", c.GetFinalRules())
 	}
 }
+
+func TestCompositeOutboundsWithoutRulesCatchAllTraffic(t *testing.T) {
+	info := nodeWithEgress("node-a", "")
+	info.Common.Routes = []panel.Route{
+		{Id: 1, Rule: json.RawMessage(`{"outbounds":[{"tag":"custom-out","protocol":"freedom"},{"tag":"spare-out","protocol":"freedom"}]}`)},
+		{Id: 2, Rule: json.RawMessage(`{"tag":"later-out","protocol":"freedom"}`)},
+	}
+	_, _, router, err := GetCustomConfig([]*panel.NodeInfo{info})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	var got []string
+	for _, rule := range router.GetRule() {
+		got = append(got, rule.GetTag())
+	}
+	want := []string{"dns_out", "custom-out", "later-out"}
+	if len(got) != len(want) {
+		t.Fatalf("rule tags = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("rule tags = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestCompositeOutboundReferencedByRuleIsNotCatchAll(t *testing.T) {
+	info := nodeWithEgress("node-a", "")
+	info.Common.Routes = []panel.Route{
+		{Id: 1, Rule: json.RawMessage(`{"outbounds":[{"tag":"custom-out","protocol":"freedom"}],"rules":[{"domain":["full:split.test"],"outboundTag":"custom-out"}]}`)},
+	}
+	_, _, router, err := GetCustomConfig([]*panel.NodeInfo{info})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	rules := router.GetRule()
+	if len(rules) != 2 || rules[1].GetTag() != "custom-out" {
+		t.Fatalf("expected only the explicit split rule, got %d rules", len(rules))
+	}
+}

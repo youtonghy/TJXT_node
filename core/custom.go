@@ -429,6 +429,9 @@ func collectRouteItems(
 		if rawDNS, ok := obj["dns"]; ok {
 			dnsServers = appendDNSFromJSON(dnsServers, rawDNS, logger)
 		}
+		// As in Xray, the fragment's first outbound takes the traffic its own rules
+		// leave unmatched.
+		var firstOutbound string
 		if rawOutbounds, ok := obj["outbounds"]; ok {
 			var obList []json.RawMessage
 			if err := json.Unmarshal(rawOutbounds, &obList); err != nil {
@@ -436,7 +439,12 @@ func collectRouteItems(
 			} else {
 				for idx, rawOb := range obList {
 					defaultTag := fmt.Sprintf("route_%d_%d", routeID, idx)
-					outbounds, _, _ = registerCustomOutbound(outbounds, rawOb, defaultTag, blockPrivate, logger)
+					var tag string
+					var ok bool
+					outbounds, tag, ok = registerCustomOutbound(outbounds, rawOb, defaultTag, blockPrivate, logger)
+					if idx == 0 && ok {
+						firstOutbound = tag
+					}
 				}
 			}
 		}
@@ -458,6 +466,9 @@ func collectRouteItems(
 					)
 				}
 			}
+		}
+		if firstOutbound != "" {
+			pending = append(pending, outboundRule(node, routeID, firstOutbound, nil, logger))
 		}
 		return dnsServers, outbounds, pending
 	}
@@ -527,32 +538,40 @@ func collectRouteItems(
 		}
 
 		ruleMap := make(map[string]json.RawMessage)
-		hasMatch := false
 		for _, k := range routingMatchKeys {
 			if v, exists := obj[k]; exists {
 				ruleMap[k] = v
-				hasMatch = true
 			}
 		}
-		if !hasMatch {
-			netBytes, _ := json.Marshal("tcp,udp")
-			ruleMap["network"] = netBytes
-		}
-		tagBytes, _ := json.Marshal(tag)
-		node.bind(ruleMap, logger)
-		ruleMap["outboundTag"] = tagBytes
-
-		pending = append(pending, pendingNodeRule{
-			routeID:        routeID,
-			ruleMap:        ruleMap,
-			pureOutbound:   !hasMatch,
-			targetOutbound: tag,
-		})
+		pending = append(pending, outboundRule(node, routeID, tag, ruleMap, logger))
 		return dnsServers, outbounds, pending
 	}
 
 	logger.Warn("Skip route: unrecognized Xray rule JSON")
 	return dnsServers, outbounds, pending
+}
+
+// outboundRule routes the node's traffic matching ruleMap to tag. Without match
+// fields it catches all traffic and is pure: dropped when another rule on the
+// node routes to tag explicitly.
+func outboundRule(node nodeBinding, routeID int, tag string, ruleMap map[string]json.RawMessage, logger *log.Entry) pendingNodeRule {
+	pure := len(ruleMap) == 0
+	if ruleMap == nil {
+		ruleMap = make(map[string]json.RawMessage)
+	}
+	if pure {
+		netBytes, _ := json.Marshal("tcp,udp")
+		ruleMap["network"] = netBytes
+	}
+	node.bind(ruleMap, logger)
+	tagBytes, _ := json.Marshal(tag)
+	ruleMap["outboundTag"] = tagBytes
+	return pendingNodeRule{
+		routeID:        routeID,
+		ruleMap:        ruleMap,
+		pureOutbound:   pure,
+		targetOutbound: tag,
+	}
 }
 
 func normalizeOutboundTag(tag string) string {
