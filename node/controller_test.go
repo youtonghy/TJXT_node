@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -213,5 +214,49 @@ func TestTLSNodeReportsItsCertificateFingerprint(t *testing.T) {
 	}
 	if fingerprint == "" || fingerprint != want || len(fingerprint) != 64 {
 		t.Fatalf("fingerprint %q, want %q", fingerprint, want)
+	}
+}
+
+// The node reports its runtime state on config pulls: nothing before its first
+// apply, "down" with a reason while its inbound cannot come up, "ok" after.
+func TestNodeStateIsReportedOnConfigPulls(t *testing.T) {
+	p := newFakePanel(t, "shadowsocks", testUsers(1))
+	p.config["cipher"] = "no-such-cipher"
+	ctrl, _ := startTestController(t, p)
+	// startTestController fetched the config before the controller applied it.
+	if got := p.ConfigStates()[0]; got != (nodeStateHeaders{}) {
+		t.Fatalf("state before the first apply: %+v", got)
+	}
+	poll(t, ctrl)
+	got := p.LastConfigState()
+	if got.State != "down" || !strings.HasPrefix(got.Error, "apply node failed: ") {
+		t.Fatalf("broken inbound: %+v", got)
+	}
+
+	// The fixed config is pulled (still reporting down) and rebuilt in place.
+	p.setConfig("cipher", "aes-128-gcm")
+	poll(t, ctrl)
+	if !inboundRunning(ctrl) {
+		t.Fatal("inbound not running after the fix")
+	}
+	poll(t, ctrl)
+	if got := p.LastConfigState(); got != (nodeStateHeaders{State: "ok"}) {
+		t.Fatalf("after recovery: %+v", got)
+	}
+}
+
+func TestCertFailureIsReportedAsDown(t *testing.T) {
+	p, unblock := certBlockedPanel(t)
+	ctrl, _ := startTestController(t, p)
+	poll(t, ctrl)
+	got := p.LastConfigState()
+	if got.State != "down" || !strings.HasPrefix(got.Error, "request cert failed: ") {
+		t.Fatalf("missing cert: %+v", got)
+	}
+	unblock()
+	poll(t, ctrl)
+	poll(t, ctrl)
+	if got := p.LastConfigState(); got != (nodeStateHeaders{State: "ok"}) {
+		t.Fatalf("after the cert fix: %+v", got)
 	}
 }

@@ -160,7 +160,7 @@ type EncSettings struct {
 
 func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	if c.v3Available() {
-		r, data, err := c.callV3(ctx, "GET", "server/UniProxy/config", identityParams(c), c.getNodeEtag())
+		r, data, err := c.callV3With(ctx, "GET", "server/UniProxy/config", identityParams(c), c.getNodeEtag(), c.setNodeStateHeaders)
 		if err == nil {
 			if r.StatusCode() == 304 {
 				return nil, nil
@@ -175,12 +175,13 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		return nil, fmt.Errorf("v3 config failed and v1 fallback is disabled")
 	}
 	const path = "/api/v2/server/config"
-	r, err := c.client.
+	req := c.client.
 		R().
 		SetContext(ctx).
 		SetHeader("If-None-Match", c.getNodeEtag()).
-		ForceContentType("application/json").
-		Get(path)
+		ForceContentType("application/json")
+	c.setNodeStateHeaders(req)
+	r, err := req.Get(path)
 	if err != nil {
 		return nil, err
 	}

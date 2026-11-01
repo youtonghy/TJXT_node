@@ -67,6 +67,19 @@ func (c *Client) callV3(
 	params any,
 	ifNoneMatch string,
 ) (*resty.Response, []byte, error) {
+	return c.callV3With(ctx, method, endpoint, params, ifNoneMatch, nil)
+}
+
+// callV3With is callV3 with prepare, if set, adjusting the request before it
+// is sent.
+func (c *Client) callV3With(
+	ctx context.Context,
+	method string,
+	endpoint string,
+	params any,
+	ifNoneMatch string,
+	prepare func(*resty.Request),
+) (*resty.Response, []byte, error) {
 	payload := map[string]any{
 		"endpoint": endpoint,
 		"method":   method,
@@ -79,6 +92,9 @@ func (c *Client) callV3(
 		SetBody(payload)
 	if ifNoneMatch != "" {
 		req.SetHeader("If-None-Match", ifNoneMatch)
+	}
+	if prepare != nil {
+		prepare(req)
 	}
 	r, err := req.Post("/api/v3/server")
 	if err != nil {

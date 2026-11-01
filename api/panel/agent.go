@@ -26,6 +26,8 @@ var AgentFeatures = []string{
 	// Nodes may share another node's inbound (shared_inbound): one listener,
 	// per-node credentials, traffic and routes.
 	"shared-inbound",
+	// Config pulls carry the node's runtime state (X-TJXT-Node-State).
+	"node-state",
 }
 
 // FeaturesHeader carries AgentFeatures, comma separated.

@@ -95,9 +95,9 @@ func (c *Controller) Start(x *core.V2Core) error {
 	// Update user. A panel that is unreachable now must not keep this node
 	// (or the others) from starting: the inbound stays down and the next poll
 	// fetches the list again.
-	users, err := c.apiClient.GetUserList(context.Background())
-	if err != nil {
-		log.WithFields(log.Fields{"tag": node.Tag, "err": err}).
+	users, usersErr := c.apiClient.GetUserList(context.Background())
+	if usersErr != nil {
+		log.WithFields(log.Fields{"tag": node.Tag, "err": usersErr}).
 			Error("Get user list failed, the inbound stays down until the next poll gets it")
 		users = nil
 	}
@@ -130,6 +130,10 @@ func (c *Controller) Start(x *core.V2Core) error {
 		// reloads the node.
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).
 			Error("Apply node failed, the other nodes keep running and this one retries on the next poll")
+	} else if usersErr != nil {
+		// The empty list applied above is not the panel's: the inbound stays
+		// down until a poll gets the list.
+		c.reportDown("get user list failed", usersErr)
 	}
 	c.startTasks(node)
 	return nil
@@ -144,6 +148,7 @@ func (c *Controller) ensureCert() bool {
 	if err := c.requestCert(); err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).
 			Error("Request cert failed, this node stays down and retries on the next poll; the other nodes keep running")
+		c.reportDown("request cert failed", err)
 		return false
 	}
 	c.certPending = false
@@ -261,6 +266,7 @@ func (c *Controller) reloadInbound(info *panel.NodeInfo) {
 		if err := c.server.RebuildInbound(info.Inbound(), info); err != nil {
 			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Rebuilding the shared inbound failed, retrying on the next poll")
 			c.resetRuntime()
+			c.reportDown("rebuild shared inbound failed", err)
 		}
 		log.WithField("tag", c.tag).Info("Node config changed, rebuilding the shared inbound")
 		return
@@ -312,10 +318,13 @@ func (c *Controller) revokeUsers(ids []int) {
 // when the applied list is non-empty: the first users start it, the last removed
 // user stops it. If applying fails, the runtime is torn down and rebuilt from
 // scratch on the next poll, even if the panel then answers "unchanged".
+// The outcome is the node state reported to the panel.
 func (c *Controller) syncUsers() error {
 	desired := c.desiredUsers
 	deleted, added, modified := compareUserList(c.userList, desired)
 	if !c.resync && len(deleted) == 0 && len(added) == 0 && len(modified) == 0 {
+		// The runtime already matches the list (a failed sync sets resync).
+		c.apiClient.SetNodeUp()
 		return nil
 	}
 	if len(deleted) > 0 && len(c.userList) > 0 {
@@ -324,11 +333,13 @@ func (c *Controller) syncUsers() error {
 	}
 	if err := c.applyUserDiff(desired, deleted, added); err != nil {
 		c.resetRuntime()
+		c.reportDown("apply node failed", err)
 		return err
 	}
 	c.limiter.UpdateUser(c.tag, added, deleted, modified)
 	c.userList = desired
 	c.resync = false
+	c.apiClient.SetNodeUp()
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	return nil
 }
@@ -386,6 +397,13 @@ func (c *Controller) applyUserDiff(desired, deleted, added []panel.UserInfo) err
 	}
 	log.WithField("tag", c.tag).Infof("Added %d new users", n)
 	return nil
+}
+
+// reportDown tells the panel, on the next config pull, that this node's inbound
+// is down: what failed (a fixed phrase) and why, with the node's secrets
+// redacted.
+func (c *Controller) reportDown(what string, err error) {
+	c.apiClient.SetNodeDown(fmt.Sprintf("%s: %s", what, err), c.nodeInfo().Secrets()...)
 }
 
 // resetRuntime tears the runtime down after a failed sync so the next sync

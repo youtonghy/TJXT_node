@@ -42,6 +42,14 @@ type fakePanel struct {
 	certFingerprint string
 	// aliveReports are the bodies of the alive reports.
 	aliveReports []string
+	// configStates are the node state headers of each config fetch.
+	configStates []nodeStateHeaders
+}
+
+// nodeStateHeaders are the X-TJXT-Node-State and X-TJXT-Node-Error headers of
+// one request ("" when absent).
+type nodeStateHeaders struct {
+	State, Error string
 }
 
 func newFakePanel(t *testing.T, protocol string, users []panel.UserInfo) *fakePanel {
@@ -77,6 +85,10 @@ func (p *fakePanel) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	case "/api/v2/server/config":
 		p.configFetches++
+		p.configStates = append(p.configStates, nodeStateHeaders{
+			State: r.Header.Get(panel.NodeStateHeader),
+			Error: r.Header.Get(panel.NodeErrorHeader),
+		})
 		_ = json.NewEncoder(w).Encode(p.config)
 	case "/api/v1/server/UniProxy/user":
 		p.userFetches++
@@ -125,6 +137,22 @@ func (p *fakePanel) CertFingerprint() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.certFingerprint
+}
+
+// ConfigStates returns the node state headers of every config fetch.
+func (p *fakePanel) ConfigStates() []nodeStateHeaders {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]nodeStateHeaders(nil), p.configStates...)
+}
+
+// LastConfigState returns the node state headers of the latest config fetch.
+func (p *fakePanel) LastConfigState() nodeStateHeaders {
+	states := p.ConfigStates()
+	if len(states) == 0 {
+		return nodeStateHeaders{}
+	}
+	return states[len(states)-1]
 }
 
 func (p *fakePanel) setConfig(key string, value any) {
