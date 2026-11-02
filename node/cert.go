@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -22,16 +23,28 @@ import (
 
 // certFingerprint is the hex SHA-256 of the first certificate in a PEM file.
 func certFingerprint(path string) (string, error) {
+	fingerprint, _, err := certTrust(path)
+	return fingerprint, err
+}
+
+func certTrust(path string) (string, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	block, _ := pem.Decode(data)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return "", fmt.Errorf("no certificate in %s", path)
+		return "", "", fmt.Errorf("no certificate in %s", path)
+	}
+	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+		return "", "", fmt.Errorf("parse public certificate: %w", err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(block.Bytes)
+	if len(encoded) > 8192 {
+		return "", "", fmt.Errorf("public certificate exceeds reporting limit")
 	}
 	sum := sha256.Sum256(block.Bytes)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:]), encoded, nil
 }
 
 // reportCertFingerprint tells the panel the fingerprint of this node's current TLS
@@ -40,15 +53,15 @@ func (c *Controller) reportCertFingerprint() {
 	info := c.nodeInfo()
 	cert := info.Common.CertInfo
 	if info.Security != panel.Tls || cert == nil || cert.CertFile == "" {
-		c.apiClient.SetCertFingerprint("")
+		c.apiClient.SetCertTrust("", "")
 		return
 	}
-	fingerprint, err := certFingerprint(cert.CertFile)
+	fingerprint, der, err := certTrust(cert.CertFile)
 	if err != nil {
 		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Reading the certificate fingerprint failed")
 		return
 	}
-	c.apiClient.SetCertFingerprint(fingerprint)
+	c.apiClient.SetCertTrust(fingerprint, der)
 }
 
 func (c *Controller) renewCertTask(_ context.Context) error {

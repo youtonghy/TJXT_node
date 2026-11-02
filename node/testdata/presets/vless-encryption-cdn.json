@@ -30,11 +30,6 @@
   "sniffing": {},
   "streamSettings": {
     "network": "xhttp",
-    "sockopt": {
-      "trustedXForwardedFor": [
-        "X-Forwarded-For"
-      ]
-    },
     "xhttpSettings": {
       "host": "",
       "mode": "packet-up",
