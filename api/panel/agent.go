@@ -26,6 +26,7 @@ var AgentFeatures = []string{
 	// Nodes may share another node's inbound (shared_inbound): one listener,
 	// per-node credentials, traffic and routes.
 	"shared-inbound",
+	"ss2022-key-derivation",
 }
 
 // FeaturesHeader carries AgentFeatures, comma separated.
@@ -44,12 +45,29 @@ func featuresHeader() string {
 // the value Xray clients pin with pinnedPeerCertSha256.
 const CertFingerprintHeader = "X-TJXT-Cert-SHA256"
 
+// CertDERHeader carries only the public leaf certificate, base64 encoded DER.
+const CertDERHeader = "X-TJXT-Cert-DER"
+
+// SetCertTrust updates both values together so renewals never report a mixed pair.
+func (c *Client) SetCertTrust(fingerprint, der string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.certSHA256, c.certDER = fingerprint, der
+}
+
+func (c *Client) certTrust() (string, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.certSHA256, c.certDER
+}
+
 // SetCertFingerprint reports the node's certificate fingerprint on later requests;
 // an empty one stops reporting it.
 func (c *Client) SetCertFingerprint(fingerprint string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.certSHA256 = fingerprint
+	c.certDER = ""
 }
 
 func (c *Client) certFingerprint() string {

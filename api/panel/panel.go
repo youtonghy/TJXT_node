@@ -35,6 +35,7 @@ type Client struct {
 	// certSHA256 is the hex SHA-256 of the node's TLS certificate, reported so
 	// clients can pin a self-signed one.
 	certSHA256 string
+	certDER    string // base64 public leaf certificate; never the private key
 	// learnedID is the panel's base_config.node_id seen when pairing by key.
 	// It is used for tags and logs only: requests keep identifying the node by
 	// its key, so a node moved to another id by the panel still works.
@@ -133,8 +134,12 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		mode:    parseProtocolMode(c.Protocol),
 	}
 	client.OnBeforeRequest(func(_ *resty.Client, req *resty.Request) error {
-		if fingerprint := p.certFingerprint(); fingerprint != "" {
+		fingerprint, der := p.certTrust()
+		if fingerprint != "" {
 			req.SetHeader(CertFingerprintHeader, fingerprint)
+		}
+		if der != "" {
+			req.SetHeader(CertDERHeader, der)
 		}
 		return nil
 	})

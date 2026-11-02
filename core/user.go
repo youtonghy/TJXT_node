@@ -2,7 +2,10 @@ package core
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -109,7 +112,8 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 		users, err = buildSSUsers(p.Tag,
 			p.Users,
 			p.Common.Cipher,
-			p.Common.ServerKey)
+			p.Common.ServerKey,
+			p.Common.SS2022UserKeySeed)
 		if err != nil {
 			return 0, err
 		}
@@ -204,8 +208,12 @@ func buildTrojanUser(tag string, userInfo *panel.UserInfo) (user *protocol.User)
 	}
 }
 
-func buildSSUsers(tag string, userInfo []panel.UserInfo, cypher string, serverKey string) ([]*protocol.User, error) {
+func buildSSUsers(tag string, userInfo []panel.UserInfo, cypher string, serverKey string, seed json.RawMessage) ([]*protocol.User, error) {
 	method, err := ssMethod(cypher, serverKey)
+	if err != nil {
+		return nil, err
+	}
+	method.userKeySeed, err = ss2022Seed(seed)
 	if err != nil {
 		return nil, err
 	}
@@ -230,12 +238,11 @@ func buildSSUser(tag string, userInfo *panel.UserInfo, method ssCipher) (*protoc
 			Account: serial.ToTypedMessage(ssAccount),
 		}, nil
 	}
-	if len(userInfo.Uuid) < method.keyLen {
-		return nil, fmt.Errorf("user %d: uuid is shorter than the %d-byte %s key", userInfo.Id, method.keyLen, method.name)
+	key, err := ss2022UserPSK(method, userInfo.Uuid)
+	if err != nil {
+		return nil, fmt.Errorf("user %d: %w", userInfo.Id, err)
 	}
-	ssAccount := &shadowsocks_2022.Account{
-		Key: base64.StdEncoding.EncodeToString([]byte(userInfo.Uuid[:method.keyLen])),
-	}
+	ssAccount := &shadowsocks_2022.Account{Key: key}
 	return &protocol.User{
 		Level:   0,
 		Email:   format.UserTag(tag, userInfo.Uuid),
@@ -257,10 +264,41 @@ var SupportedShadowsocksCiphers = []string{
 
 // ssCipher is a Shadowsocks method the node serves.
 type ssCipher struct {
-	name   string // lower-case method name
-	is2022 bool
-	keyLen int                    // 2022: user and server key length
-	legacy shadowsocks.CipherType // classic AEAD methods
+	name        string // lower-case method name
+	is2022      bool
+	keyLen      int                    // 2022: user and server key length
+	legacy      shadowsocks.CipherType // classic AEAD methods
+	userKeySeed []byte                 // nil preserves legacy UUID truncation
+}
+
+// Missing is legacy; a present invalid seed must never silently downgrade.
+func ss2022Seed(raw json.RawMessage) ([]byte, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil {
+		seed, err := base64.StdEncoding.Strict().DecodeString(encoded)
+		if err == nil && len(seed) == 32 && base64.StdEncoding.EncodeToString(seed) == encoded {
+			return seed, nil
+		}
+	}
+	return nil, fmt.Errorf("ss2022_user_key_seed must be standard base64 encoding exactly 32 bytes")
+}
+
+// Shared wire contract with the panel: HMAC-SHA256(seed,
+// "tjxt-ss2022-user-psk:v1\x00" + canonical cipher + "\x00" + actual UUID credential).
+// Truncate to the cipher's key length, then standard base64 encode.
+func ss2022UserPSK(method ssCipher, credential string) (string, error) {
+	if method.userKeySeed == nil {
+		if len(credential) < method.keyLen {
+			return "", fmt.Errorf("uuid is shorter than the %d-byte %s key", method.keyLen, method.name)
+		}
+		return base64.StdEncoding.EncodeToString([]byte(credential[:method.keyLen])), nil
+	}
+	mac := hmac.New(sha256.New, method.userKeySeed)
+	mac.Write([]byte("tjxt-ss2022-user-psk:v1\x00" + method.name + "\x00" + credential))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil)[:method.keyLen]), nil
 }
 
 // ssMethod resolves the panel's cipher. Unsupported ciphers and 2022 methods

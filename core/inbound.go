@@ -323,6 +323,9 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	if err != nil {
 		return err
 	}
+	if _, err := ss2022Seed(s.SS2022UserKeySeed); err != nil {
+		return err
+	}
 	settings := &coreConf.ShadowsocksServerConfig{
 		Cipher: method.name,
 	}

@@ -73,8 +73,10 @@ func TestRequestsIdentifyTheAgent(t *testing.T) {
 		!strings.Contains(req.Header.Get("User-Agent"), " xray/") {
 		t.Fatalf("user agent %q", req.Header.Get("User-Agent"))
 	}
-	if !strings.Contains(req.Header.Get(FeaturesHeader), "revoked-users") {
-		t.Fatalf("features %q", req.Header.Get(FeaturesHeader))
+	for _, feature := range []string{"revoked-users", "ss2022-key-derivation"} {
+		if !strings.Contains(req.Header.Get(FeaturesHeader), feature) {
+			t.Fatalf("features missing %s", feature)
+		}
 	}
 }
 

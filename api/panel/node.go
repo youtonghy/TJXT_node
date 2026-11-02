@@ -76,6 +76,8 @@ type CommonNode struct {
 	//shadowsocks
 	Cipher    string `json:"cipher"`
 	ServerKey string `json:"server_key"`
+	// Absent is legacy derivation; present null, empty or malformed seeds are errors.
+	SS2022UserKeySeed json.RawMessage `json:"ss2022_user_key_seed,omitempty"`
 	//tuic
 	CongestionControl string   `json:"congestion_control"`
 	ZeroRTTHandshake  FlexBool `json:"zero_rtt_handshake"`

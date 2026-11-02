@@ -101,7 +101,7 @@ func TestShadowsocksCiphers(t *testing.T) {
 		if _, err := buildInbound(testNode(t, raw), "test", nil); err != nil {
 			t.Fatalf("%s: %v", tc.cipher, err)
 		}
-		if _, err := buildSSUsers("test", users, tc.cipher, tc.key); err != nil {
+		if _, err := buildSSUsers("test", users, tc.cipher, tc.key, nil); err != nil {
 			t.Fatalf("%s users: %v", tc.cipher, err)
 		}
 	}
@@ -116,7 +116,7 @@ func TestShadowsocksCiphers(t *testing.T) {
 		if _, err := buildInbound(testNode(t, raw), "test", nil); err == nil || !strings.Contains(err.Error(), tc.errText) {
 			t.Fatalf("%q: expected an error about %s, got %v", tc.cipher, tc.errText, err)
 		}
-		if _, err := buildSSUsers("test", users, tc.cipher, tc.key); err == nil {
+		if _, err := buildSSUsers("test", users, tc.cipher, tc.key, nil); err == nil {
 			t.Fatalf("%q users: expected an error", tc.cipher)
 		}
 	}
