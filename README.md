@@ -115,6 +115,12 @@ sudo tjxt-node-deploy restart
 sudo tjxt-node-deploy update
 ```
 
+自动更新：从 Release 安装或 `update` 后默认开启，每 4 小时运行一次 `tjxt-node-deploy auto-update`（systemd 用 `tjxt-node-update.timer`，带 15 分钟随机延迟，日志见 `journalctl -u tjxt-node-update`；没有 systemd 时用 cron，日志在 `/var/log/tjxt-node-update.log`）。它下载最新 Release 的 `SHA256SUMS`，本机二进制与之一致就什么都不做；不一致时才下载、校验并安装新的二进制和 `deploy.sh`，然后重启服务。手动检查：`sudo tjxt-node-deploy auto-update`。
+
+- `install`/`update` 加 `--no-auto-update` 会关闭自动更新（删除定时任务）；之后再运行 `update` 时如仍要关闭，需要再加该参数。用 `--version` 固定版本或从源码编译时也不启用。
+- 定时任务不继承安装时的环境变量。私有仓库或镜像请把 `GITHUB_TOKEN`、`TJXT_RELEASE_BASE_URL`、`TJXT_GITHUB_REPO` 以 `KEY=value` 写入 `/etc/tjxt-node-update.env`（文件必须属于 root 且其他用户不可写，建议 `chmod 600`）。
+- 已安装的旧版本需要先手动运行一次 `sudo tjxt-node-deploy update`，之后才会自动更新。
+
 仅本地编译、不装服务：`./deploy.sh local`。节点监听端口由面板下发，脚本不会改防火墙。
 
 ## Release

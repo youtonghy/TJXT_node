@@ -14,6 +14,12 @@ readonly DEFAULT_SRC="/usr/local/src/TJXT_node"
 readonly DEFAULT_PROTOCOL="auto"
 readonly SERVICE_NAME="tjxt-node"
 readonly SERVICE_USER="tjxt-node"
+readonly CTL_PATH="/usr/local/sbin/tjxt-node-deploy"
+readonly UPDATE_NAME="tjxt-node-update"
+# Root-only settings for the automatic update (GITHUB_TOKEN, TJXT_RELEASE_BASE_URL,
+# TJXT_GITHUB_REPO). It lives outside CONFIG_DIR, which the service user owns.
+readonly UPDATE_ENV="/etc/tjxt-node-update.env"
+readonly UPDATE_CRON_TAG="# tjxt-node auto-update"
 LOG_FILE="${TJXT_LOG_FILE:-/var/log/${APP_NAME}/node.log}"
 
 red='\033[0;31m'
@@ -40,6 +46,7 @@ NODE_ACTION=""
 NO_START=0
 YES=0
 PURGE=0
+AUTO_UPDATE=1
 SRC=""
 PROMPTED=0
 PAIR_INFO=""
@@ -71,6 +78,7 @@ TJXT_node 一键部署（TONG-ladder 节点）
 子命令:
   install      安装或更新（默认）
   update       更新二进制（默认下载最新 Release）
+  auto-update  检查最新 Release，有新版本才更新并重启（自动更新定时任务调用）
   start|stop|restart|status|log
   uninstall    卸载服务和二进制（默认保留配置）
   local        仅本地编译，不安装 systemd
@@ -91,6 +99,7 @@ TJXT_node 一键部署（TONG-ladder 节点）
   --force-config            覆盖已有配置（新配置先经 tjxt-node pair 校验）
   --node-action MODE        已有配置时选择 replace 或 append（交互时询问，非交互默认 append）
   --no-start                安装后不启动服务
+  --no-auto-update          不启用自动更新（默认每 4 小时检查一次最新 Release）
   --yes                     卸载时跳过确认
   --purge                   卸载时同时删除配置和日志
   -h, --help                显示帮助
@@ -173,7 +182,7 @@ version_ge() {
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      install|update|start|stop|restart|status|log|uninstall|local|menu)
+      install|update|auto-update|start|stop|restart|status|log|uninstall|local|menu)
         CMD="$1"
         shift
         ;;
@@ -227,6 +236,8 @@ parse_args() {
         NODE_ACTION="${1#*=}"; shift ;;
       --no-start)
         NO_START=1; shift ;;
+      --no-auto-update)
+        AUTO_UPDATE=0; shift ;;
       --yes|-y)
         YES=1; shift ;;
       --purge)
@@ -892,11 +903,172 @@ EOF
 }
 
 install_ctl_wrapper() {
-  local ctl="/usr/local/sbin/tjxt-node-deploy"
   local script="${PREFIX}/deploy.sh"
   [[ -n "$SRC" ]] && script="$SRC/deploy.sh"
-  install -m 755 "$script" "$ctl"
-  log "管理命令: ${ctl} start|stop|restart|status|log|update"
+  install -m 755 "$script" "$CTL_PATH"
+  log "管理命令: ${CTL_PATH} start|stop|restart|status|log|update"
+}
+
+# auto_update_off_reason prints why automatic updates stay off: source builds,
+# pinned versions and --no-auto-update, so a check never replaces a binary the
+# user chose. It prints nothing when they are on.
+auto_update_off_reason() {
+  if [[ -n "$SRC" ]]; then
+    printf '源码编译安装'
+  elif [[ "$VERSION" != "latest" ]]; then
+    printf '已固定版本 %s' "$VERSION"
+  elif ((!AUTO_UPDATE)); then
+    printf -- '--no-auto-update'
+  fi
+}
+
+# setup_auto_update checks for a new release every 4 hours (systemd timer, or
+# cron without systemd).
+setup_auto_update() {
+  local reason
+  reason="$(auto_update_off_reason)"
+  if [[ -n "$reason" ]]; then
+    remove_auto_update
+    log "自动更新未启用（${reason}）"
+    return 0
+  fi
+  if has_systemd; then
+    write_update_timer
+  elif ! write_update_cron; then
+    warn "未检测到 systemd 或 cron，自动更新未启用；可定期运行: ${CTL_PATH} auto-update"
+    return 0
+  fi
+  log "已启用自动更新：每 4 小时检查一次最新 Release"
+}
+
+write_update_timer() {
+  cat >"/etc/systemd/system/${UPDATE_NAME}.service" <<EOF
+[Unit]
+Description=Update TJXT_node when a new release is published
+Documentation=https://github.com/youtonghy/TJXT_node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${CTL_PATH} auto-update
+EOF
+  # The random delay spreads a fleet's checks so nodes do not all restart at once.
+  cat >"/etc/systemd/system/${UPDATE_NAME}.timer" <<EOF
+[Unit]
+Description=Check for a new TJXT_node release every 4 hours
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=4h
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now "${UPDATE_NAME}.timer" >/dev/null
+}
+
+# write_update_cron installs a cron job at a random minute every 4 hours:
+# /etc/cron.d where the cron daemon reads it, otherwise busybox's root crontab.
+# The log stays out of the service user's log directory, since root writes it.
+write_update_cron() {
+  local m=$((RANDOM % 60)) h=$((RANDOM % 4))
+  local path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  local job="${CTL_PATH} auto-update >>/var/log/${UPDATE_NAME}.log 2>&1"
+  if [[ -d /etc/cron.d ]]; then
+    cat >"/etc/cron.d/${UPDATE_NAME}" <<EOF
+${UPDATE_CRON_TAG}
+PATH=${path}
+${m} ${h}-23/4 * * * root ${job}
+EOF
+    chmod 644 "/etc/cron.d/${UPDATE_NAME}"
+  elif [[ -d /etc/crontabs ]]; then
+    drop_crontab_line
+    printf '%s %s-23/4 * * * PATH=%s %s %s\n' "$m" "$h" "$path" "$job" "$UPDATE_CRON_TAG" \
+      >>/etc/crontabs/root
+    chmod 600 /etc/crontabs/root
+  else
+    return 1
+  fi
+  if has_openrc && [[ -x /etc/init.d/crond ]]; then
+    rc-update add crond default >/dev/null 2>&1 || warn "无法把 crond 设为开机自启"
+    rc-service crond start >/dev/null 2>&1 || warn "无法启动 crond，自动更新不会运行"
+  fi
+  return 0
+}
+
+# drop_crontab_line removes the auto-update job from busybox's root crontab.
+drop_crontab_line() {
+  local tab=/etc/crontabs/root
+  [[ -f "$tab" ]] && grep -qF "$UPDATE_CRON_TAG" "$tab" || return 0
+  grep -vF "$UPDATE_CRON_TAG" "$tab" >"${tab}.tmp" || true
+  chmod 600 "${tab}.tmp"
+  mv -f "${tab}.tmp" "$tab"
+}
+
+remove_auto_update() {
+  if [[ -f "/etc/systemd/system/${UPDATE_NAME}.timer" ]]; then
+    if has_systemd; then
+      systemctl disable --now "${UPDATE_NAME}.timer" >/dev/null 2>&1 || true
+    fi
+    rm -f "/etc/systemd/system/${UPDATE_NAME}.timer" "/etc/systemd/system/${UPDATE_NAME}.service"
+    if has_systemd; then
+      systemctl daemon-reload || true
+    fi
+  fi
+  rm -f "/etc/cron.d/${UPDATE_NAME}"
+  drop_crontab_line
+}
+
+# load_update_env reads UPDATE_ENV when only root can change it, so the timer
+# reaches a private repository or a mirror like a manual update.
+load_update_env() {
+  [[ -f "$UPDATE_ENV" ]] || return 0
+  local owner mode
+  owner="$(stat -c %u "$UPDATE_ENV")"
+  mode="$(stat -c %a "$UPDATE_ENV")"
+  if [[ "$owner" != 0 || $((8#$mode & 8#022)) -ne 0 ]]; then
+    die "${UPDATE_ENV} 必须属于 root 且其他用户不可写（chown root ${UPDATE_ENV}; chmod 600 ${UPDATE_ENV}）"
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  . "$UPDATE_ENV"
+  set +a
+  GITHUB_REPO="${TJXT_GITHUB_REPO:-$GITHUB_REPO}"
+}
+
+# cmd_auto_update installs the latest release only when its binary differs from
+# the installed one (by SHA256SUMS), then restarts the service. When the binary
+# is current nothing is installed or restarted.
+cmd_auto_update() {
+  need_root
+  load_update_env
+  VERSION=latest
+  ensure_commands curl sha256sum
+  [[ -n "${GITHUB_TOKEN:-}" ]] && ensure_commands jq
+  [[ "$(os_id)" == "linux" ]] || die "Release 只提供 Linux 二进制"
+  local asset tmp want got=""
+  asset="${APP_NAME}-linux-$(go_arch)"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"; trap - RETURN' RETURN
+  fetch_release_assets "$tmp" SHA256SUMS
+  want="$(awk -v n="$asset" '$2 == n || $2 == "*" n { print $1; exit }' "${tmp}/SHA256SUMS")"
+  [[ -n "$want" ]] || die "SHA256SUMS 中没有 ${asset}"
+  if [[ -f "$(binary_path)" ]]; then
+    got="$(sha256sum "$(binary_path)" | awk '{ print $1 }')"
+  fi
+  if [[ "$got" == "$want" ]]; then
+    log "已是最新版本（$("$(binary_path)" version 2>/dev/null | head -n 1 || echo unknown)）"
+    return 0
+  fi
+  log "发现新版本，开始更新"
+  download_release
+  install_ctl_wrapper
+  install_service
+  setup_auto_update
+  log "已更新"
 }
 
 svc() {
@@ -947,7 +1119,8 @@ cmd_uninstall() {
     rc-update del "$SERVICE_NAME" default >/dev/null 2>&1 || true
     rm -f "/etc/init.d/${SERVICE_NAME}"
   fi
-  rm -f "$(binary_path)" "/usr/local/bin/${APP_NAME}" /usr/local/sbin/tjxt-node-deploy
+  remove_auto_update
+  rm -f "$(binary_path)" "/usr/local/bin/${APP_NAME}" "$CTL_PATH"
   if [[ "$PURGE" -eq 1 ]]; then
     rm -rf "$CONFIG_DIR" "/var/log/${APP_NAME}" "$PREFIX"
     log "已删除配置和日志"
@@ -1012,6 +1185,7 @@ cmd_install() {
   write_config
   install_ctl_wrapper
   install_service
+  setup_auto_update
   # Give a failing start a moment to show up in the state below.
   if [[ "$NO_START" -eq 0 ]] && { has_systemd || has_openrc; }; then
     sleep 3
@@ -1023,6 +1197,9 @@ cmd_install() {
   printf '  日志:     %s\n' "$(log_path)"
   service_state
   printf '  管理:     tjxt-node-deploy status|log|restart|update\n'
+  if [[ -z "$(auto_update_off_reason)" ]]; then
+    printf '  自动更新: 每 4 小时检查一次最新 Release（--no-auto-update 关闭）\n'
+  fi
   printf '  节点端口由面板下发，请自行在防火墙放行。\n'
 }
 
@@ -1043,6 +1220,7 @@ cmd_update() {
   install_ctl_wrapper
   # Rewrite the service unit so older root installs move to the service user.
   install_service
+  setup_auto_update
   log "已更新"
 }
 
@@ -1121,6 +1299,7 @@ main() {
   case "$CMD" in
     install) cmd_install "$@" ;;
     update)  cmd_update "$@" ;;
+    auto-update) cmd_auto_update ;;
     local)   cmd_local ;;
     start)   need_root; svc start ;;
     stop)    need_root; svc stop ;;
@@ -1133,4 +1312,6 @@ main() {
   esac
 }
 
-main "$@"
+# update and auto-update replace this file while it runs; exit before bash
+# reads past this line.
+main "$@"; exit
