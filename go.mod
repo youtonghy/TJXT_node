@@ -160,7 +160,7 @@ require (
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/stun/v3 v3.1.7 // indirect
 	github.com/pion/transport/v4 v4.1.0 // indirect
-	github.com/pires/go-proxyproto v0.15.0 // indirect
+	github.com/pires/go-proxyproto v0.16.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pquerna/otp v1.5.0 // indirect
@@ -240,9 +240,9 @@ require (
 )
 
 // youtonghy/xray-core: wyx2685's fork (anytls, tuic, hysteria2, shadowsocks patches)
-// merged with upstream Xray-core v26.10.21. Its REALITY adapter stays on the API of
+// merged with upstream Xray-core v26.10.31. Its REALITY adapter stays on the API of
 // the REALITY pin below.
-replace github.com/xtls/xray-core v1.260711.0 => github.com/youtonghy/xray-core v0.0.0-20261022152527-66843ca0fc2e
+replace github.com/xtls/xray-core v1.260711.0 => github.com/youtonghy/xray-core v0.0.0-20261102092613-5adab2095832
 
 // Pinned to the commit before XTLS/REALITY started rejecting Client Hellos without an
 // X25519MLKEM768 key share (2026-09-08), which locks out sing-box and mihomo clients.
